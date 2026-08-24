@@ -1,0 +1,6 @@
+aiohttp>=3.9.0
+aiohttp-socks>=0.8.0
+streamlit>=1.29.0
+pandas>=2.1.0
+pyperclip>=1.8.0
+pydantic>=2.5.0
