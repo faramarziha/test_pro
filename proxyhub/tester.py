@@ -76,6 +76,7 @@ class SingBoxTester:
         self._installer = installer or SingBoxInstaller()
         self._singbox_path = singbox_path or find_singbox_sync()
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._install_lock = asyncio.Lock()  # prevent concurrent downloads
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,9 +128,11 @@ class SingBoxTester:
         proto = proxy.protocol
 
         if proto in ("shadowsocks", "trojan", "vless", "vmess", "hysteria2", "tuic"):
-            # Lazy-init: try downloading sing-box on first real-protocol test
+            # Lazy-init with lock: only one worker triggers the download
             if not self._singbox_path:
-                self._singbox_path = await self._installer.ensure_installed()
+                async with self._install_lock:
+                    if not self._singbox_path:  # double-check after acquiring lock
+                        self._singbox_path = await self._installer.ensure_installed()
             if self._singbox_path:
                 return await self._test_via_singbox(proxy)
             else:

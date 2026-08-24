@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -31,6 +33,19 @@ from proxyhub.intelligence import (
     EnrichedResult,
 )
 
+# Setup file logging so users can send logs for debugging
+LOG_DIR = Path.home() / ".proxyhub" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "proxyhub.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 # Default subscription URL
@@ -133,10 +148,9 @@ def _init_session() -> None:
         "enriched": [],
         "df": None,
         "testing": False,
-        "progress": 0,
-        "progress_total": 0,
-        "start_time": 0.0,
         "error": None,
+        "error_traceback": None,
+        "pipeline_logs": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -154,47 +168,65 @@ async def _run_pipeline(
     timeout: float,
 ) -> list[EnrichedResult]:
     """Full pipeline: fetch → parse → test → enrich."""
+    log_msgs: list[str] = []
+
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        log_msgs.append(msg)
+        # Store in session state so the UI can show live-ish logs
+        st.session_state.pipeline_logs = log_msgs
+
     fetcher = SubscriptionFetcher()
     parser = ProxyParser()
 
     # 1. Fetch
+    _log("Fetching subscription...")
     if text_input.strip():
         result = fetcher.parse_text(text_input, source="manual")
     else:
         result = await fetcher.fetch_url(source_url)
+    _log(f"Fetched {result.proxy_count} lines (Base64: {result.is_base64})")
 
     if not result.raw_lines:
         raise ValueError("No proxy configurations found in the source.")
 
     # 2. Parse
+    _log("Parsing proxy configurations...")
     parsed = []
     for line in result.raw_lines:
         p = parser.parse(line)
         if p:
             parsed.append(p)
+    _log(f"Parsed {len(parsed)} proxies")
 
     if not parsed:
         raise ValueError("Failed to parse any proxy configurations.")
 
     # 3. Test
+    # Install sing-box first (downloaded once at pipeline start, not during testing)
     installer = SingBoxInstaller()
-    # Trigger download if not already available (lazy, non-blocking hint)
-    singbox_path = await installer.ensure_installed()
+    sb_path = await installer.ensure_installed()
+    if sb_path:
+        _log(f"sing-box ready: {sb_path}")
+    else:
+        _log("sing-box not available — using TCP fallback tests")
+
     tester = SingBoxTester(
         concurrency=concurrency,
         connect_timeout=timeout,
+        singbox_path=sb_path,  # pre-resolved path avoids race in workers
         installer=installer,
     )
 
-    def _progress(done: int, total: int, _tr) -> None:
-        st.session_state.progress = done
-        st.session_state.progress_total = total
-
-    batch = await tester.test_all(parsed, progress_callback=_progress)
+    _log(f"Testing {len(parsed)} proxies with {concurrency} workers...")
+    batch = await tester.test_all(parsed)
+    _log(f"Tested: {batch.working} working, {batch.dead} dead ({batch.elapsed_seconds}s)")
 
     # 4. Enrich
+    _log("Enriching results with IP geolocation...")
     engine = IPIntelligenceEngine()
     enriched = await enrich_test_results(batch.results, engine)
+    _log(f"Enrichment complete.")
 
     # Sort: working first, then by latency
     enriched.sort(key=lambda r: (not r.is_working, r.latency_ms))
@@ -276,33 +308,31 @@ def _render_header() -> None:
             )
         with c2:
             if st.button("🔄 Reset", use_container_width=True):
-                st.session_state.results = []
                 st.session_state.enriched = []
                 st.session_state.df = None
                 st.session_state.testing = False
+                st.session_state.error = None
+                st.session_state.error_traceback = None
+                st.session_state.pipeline_logs = []
                 st.rerun()
     if run:
         st.session_state.testing = True
-        st.session_state.progress = 0
-        st.session_state.progress_total = 0
-        st.session_state.start_time = time.time()
+        st.session_state.enriched = []
         st.session_state.error = None
+        st.session_state.error_traceback = None
+        st.session_state.pipeline_logs = []
         st.rerun()
 
 
 def _render_progress() -> None:
+    """Show pipeline logs while running."""
     if not st.session_state.testing:
         return
-    total = st.session_state.progress_total or 1
-    done = st.session_state.progress
-    elapsed = time.time() - st.session_state.start_time
-    rate = done / elapsed if elapsed > 0 else 0.0
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Tested", f"{done}/{total}")
-    col2.metric("Elapsed", f"{elapsed:.1f}s")
-    col3.metric("Rate", f"{rate:.1f}/s")
-    st.progress(min(done / total, 1.0) if total else 0.0)
+    logs = st.session_state.get("pipeline_logs", [])
+    if logs:
+        with st.expander("📝 Pipeline Log", expanded=True):
+            for msg in logs:
+                st.text(f"  • {msg}")
 
 
 def _render_metrics(enriched: list[EnrichedResult]) -> None:
@@ -538,21 +568,38 @@ def main() -> None:
     if st.session_state.testing and not st.session_state.enriched:
         with st.spinner("Running pipeline..."):
             try:
-                enriched = asyncio.run(
+                # Get or create event loop for this thread
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                enriched = loop.run_until_complete(
                     _run_pipeline(source_url, text_input, concurrency, timeout)
                 )
                 st.session_state.enriched = enriched
                 st.session_state.testing = False
+                logger.info(f"Pipeline complete: {len(enriched)} results")
                 st.rerun()
             except Exception as exc:
+                logger.error(f"Pipeline failed: {exc}", exc_info=True)
                 st.session_state.error = str(exc)
+                st.session_state.error_traceback = traceback.format_exc()
                 st.session_state.testing = False
                 st.rerun()
 
     _render_progress()
 
     if st.session_state.error:
-        st.error(f"Pipeline error: {st.session_state.error}")
+        st.error(f"❌ Pipeline error: {st.session_state.error}")
+        if st.session_state.error_traceback:
+            with st.expander("🔍 Full error details", expanded=False):
+                st.code(st.session_state.error_traceback, language="python")
+            st.info(
+                f"📄 Full logs are saved to: `{LOG_FILE}`\n\n"
+                "Send this file if you need help debugging."
+            )
 
     if st.session_state.enriched:
         _render_metrics(st.session_state.enriched)
