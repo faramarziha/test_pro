@@ -594,88 +594,134 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         return
 
     st.markdown("---")
-    st.subheader("📊  Results")
 
-    cf1, cf2, cf3, cf4, cf5 = st.columns([1.5, 1.5, 1.5, 2, 1.2])
-    with cf1:
-        protocols = sorted({r.protocol for r in enriched})
-        sel_proto = st.multiselect("Protocol", protocols, default=protocols,
-                                   key="fp", placeholder="All")
-    with cf2:
-        categories = sorted({r.category for r in enriched})
-        sel_cat = st.multiselect("Category", categories, default=categories,
-                                 key="fc", placeholder="All")
-    with cf3:
-        countries = sorted({r.country for r in enriched if r.country})
-        sel_country = st.multiselect("Country", countries, default=[],
-                                     key="fco", placeholder="All")
-    with cf4:
-        search = st.text_input("Search", placeholder="IP, host, ISP...",
+    # ── Stats cards (TOTAL / ALIVE / DEAD) ──
+    working = [r for r in enriched if r.is_working]
+    dead = len(enriched) - len(working)
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        st.markdown(
+            '<div class="metric-card"><div class="m-label">TOTAL</div>'
+            f'<div class="m-value">{len(enriched)}</div></div>',
+            unsafe_allow_html=True)
+    with sc2:
+        st.markdown(
+            '<div class="metric-card"><div class="m-label">ALIVE</div>'
+            f'<div class="m-value" style="color:#10b981">{len(working)}</div></div>',
+            unsafe_allow_html=True)
+    with sc3:
+        st.markdown(
+            '<div class="metric-card"><div class="m-label">DEAD</div>'
+            f'<div class="m-value" style="color:#ef4444">{dead}</div></div>',
+            unsafe_allow_html=True)
+
+    # ── Filter row ──
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    f1, f2 = st.columns([2, 3])
+    with f1:
+        search = st.text_input("Search", placeholder="جستجو (اسم، سرور، کشور)...",
                                key="fs", label_visibility="collapsed")
-    with cf5:
-        show_only = st.selectbox("Show", ["All", "Working only", "Dead only"],
-                                 key="fshow", label_visibility="collapsed")
+    with f2:
+        all_cats = sorted({r.category for r in enriched})
+        sel_cats = st.pills("Categories", all_cats, selection_mode="multi",
+                            key="fpills", label_visibility="collapsed")
 
+    working_only = st.checkbox("فقط کانفیگ‌های سالم", value=False, key="fwork")
+
+    # ── Apply filters ──
     rows = []
     for r in enriched:
-        if sel_proto and r.protocol not in sel_proto: continue
-        if sel_cat and r.category not in sel_cat: continue
-        if sel_country and r.country not in sel_country: continue
-        if show_only == "Working only" and not r.is_working: continue
-        if show_only == "Dead only" and r.is_working: continue
+        if working_only and not r.is_working:
+            continue
+        if sel_cats and r.category not in sel_cats:
+            continue
         if search:
             q = search.lower()
-            if not any(q in str(f).lower()
-                       for f in [r.host, r.ip, r.isp, r.country, r.city, r.proxy_raw] if f):
+            if not any(q in str(f).lower() for f in
+                       [r.host, r.ip, r.isp, r.country, r.city, r.proxy_raw] if f):
                 continue
-        rows.append({
-            "": "🟢" if r.is_working else "🔴",
-            "Protocol": r.protocol,
-            "Host": f"{r.host}:{r.port}",
-            "IP": r.ip or "—",
-            "Latency": f"{r.latency_ms:.0f} ms" if r.latency_ms > 0 else "—",
-            "Country": r.country or "—",
-            "City": r.city or "—",
-            "ISP / ASN": r.isp or "—",
-            "Category": _badge(r.category),
-            "_raw": r.proxy_raw,
-        })
+        rows.append(r)
 
     if not rows:
-        st.info("No results match the selected filters.")
+        st.info("نتیجه‌ای با فیلترهای فعلی پیدا نشد.")
         return
 
-    df = pd.DataFrame(rows)
-    display_cols = ["", "Protocol", "Host", "IP", "Latency", "Country",
-                    "City", "ISP / ASN", "Category"]
-    st.dataframe(df[display_cols], use_container_width=True, height=520,
-                 hide_index=True,
-                 column_config={
-                     "": st.column_config.Column(width="small"),
-                     "Category": st.column_config.Column(width="medium"),
-                 })
+    # ── Table header ──
+    h1, h2, h3, h4, h5, h6 = st.columns(
+        [2.6, 1.2, 0.9, 1.5, 0.9, 0.8], vertical_alignment="center")
+    h1.markdown("**NAME**")
+    h2.markdown("**COUNTRY**")
+    h3.markdown("**PING**")
+    h4.markdown("**TYPE**")
+    h5.markdown("**STATUS**")
+    h6.markdown("**COPY**")
+    st.markdown('<div style="border-top:1px solid rgba(255,255,255,0.08);margin:4px 0 8px;"></div>',
+                unsafe_allow_html=True)
 
-    # Per-row copy
-    st.markdown("---")
-    st.subheader("📋  Copy Configs")
-    cols = st.columns(4)
-    for idx, (_, row) in enumerate(df.iterrows()):
-        cfg = row["_raw"]
-        label = f"{row['Protocol']} · {row['Host']}"
-        with cols[idx % 4]:
-            with st.expander(label, expanded=False):
-                st.code(cfg, language=None)
-                if st.button("📋  Copy", key=f"cpy_{idx}", use_container_width=True):
-                    _do_copy(cfg)
-                    st.toast("Copied ✓", icon="📋")
+    # ── Pagination ──
+    PAGE_SIZE = 20
+    total_pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    if "table_page" not in st.session_state:
+        st.session_state.table_page = 0
+    st.session_state.table_page = min(st.session_state.table_page, total_pages - 1)
+    page = st.session_state.table_page
+    page_rows = rows[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
 
-    # Export
+    # ── Rows ──
+    for i, r in enumerate(page_rows):
+        c1, c2, c3, c4, c5, c6 = st.columns(
+            [2.6, 1.2, 0.9, 1.5, 0.9, 0.8], vertical_alignment="center")
+        name = _config_name(r)
+        c1.markdown(f"<span style='font-size:0.8rem;color:#d1d5db;'>{name}</span>",
+                    unsafe_allow_html=True)
+        country = r.country or "—"
+        flag = _country_flag(r.country_code) if r.country_code else ""
+        c2.markdown(f"<span style='font-size:0.78rem;color:#9ca3af;'>{flag} {country}</span>",
+                    unsafe_allow_html=True)
+        ping = f"{r.latency_ms:.0f} ms" if r.is_working and r.latency_ms > 0 else "—"
+        c3.markdown(f"<span style='font-size:0.78rem;color:#9ca3af;'>{ping}</span>",
+                    unsafe_allow_html=True)
+        c4.markdown(_badge(r.category), unsafe_allow_html=True)
+        status_icon = "🟢" if r.is_working else "🔴"
+        c5.markdown(f"<span style='font-size:0.85rem;'>{status_icon}</span>",
+                    unsafe_allow_html=True)
+        if c6.button("Copy", key=f"cpy_{page}_{i}", use_container_width=True):
+            _do_copy(r.proxy_raw)
+            st.session_state.last_copied = r.proxy_raw
+            st.toast("Copied ✓", icon="📋")
+        st.markdown('<div style="border-bottom:1px solid rgba(255,255,255,0.04);margin:2px 0;"></div>',
+                    unsafe_allow_html=True)
+
+    # ── Pagination controls ──
+    if total_pages > 1:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        pc1, pc2, pc3 = st.columns([1, 2, 1])
+        with pc1:
+            if st.button("◀  Prev", disabled=page == 0, use_container_width=True):
+                st.session_state.table_page -= 1
+                st.rerun()
+                st.stop()
+        with pc2:
+            st.markdown(
+                f"<div style='text-align:center;color:#6b7280;font-size:0.78rem;padding-top:0.5rem;'>"
+                f"Page {page + 1} / {total_pages} · {len(rows):,} results</div>",
+                unsafe_allow_html=True)
+        with pc3:
+            if st.button("Next  ▶", disabled=page >= total_pages - 1, use_container_width=True):
+                st.session_state.table_page += 1
+                st.rerun()
+                st.stop()
+
+    # ── Last copied fallback (works in every environment) ──
+    last = st.session_state.get("last_copied")
+    if last:
+        with st.expander("📋  آخرین کانفیگ کپی‌شده", expanded=False):
+            st.code(last, language=None)
+
+    # ── Bulk export ──
     st.markdown("---")
     st.subheader("💾  Export")
-    working_raws = [r.proxy_raw for r in enriched
-                    if r.is_working
-                    and (not sel_proto or r.protocol in sel_proto)
-                    and (not sel_cat or r.category in sel_cat)]
+    working_raws = [r.proxy_raw for r in rows if r.is_working]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     ex1, ex2, ex3 = st.columns(3)
@@ -688,20 +734,55 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
             {"protocol": r.protocol, "host": r.host, "port": r.port,
              "latency_ms": r.latency_ms, "country": r.country, "city": r.city,
              "isp": r.isp, "category": r.category, "config": r.proxy_raw}
-            for r in enriched if r.is_working
+            for r in rows if r.is_working
         ], indent=2, ensure_ascii=False)
         st.download_button("📊  JSON Report", json_out,
                            f"proxyhub_{ts}.json", "application/json",
                            use_container_width=True, disabled=not working_raws)
     with ex3:
         by_cat: dict[str, list[str]] = {}
-        for r in enriched:
+        for r in rows:
             if r.is_working:
                 by_cat.setdefault(r.category, []).append(r.proxy_raw)
         cat_txt = "\n\n".join(f"# {c}\n" + "\n".join(cfgs) for c, cfgs in by_cat.items())
         st.download_button("📂  By Category", cat_txt,
                            f"proxyhub_cats_{ts}.txt", "text/plain",
                            use_container_width=True, disabled=not by_cat)
+
+
+def _config_name(r: EnrichedResult) -> str:
+    """Extract a display name from the raw config fragment, fallback to host."""
+    raw = r.proxy_raw
+    if "#" in raw:
+        from urllib.parse import unquote
+        name = unquote(raw.split("#", 1)[1]).strip()
+        if name:
+            return name[:40]
+    return f"{r.protocol} · {r.host}:{r.port}"[:40]
+
+
+_FLAG_MAP = {
+    "US": "🇺🇸", "DE": "🇩🇪", "FR": "🇫🇷", "GB": "🇬🇧", "NL": "🇳🇱",
+    "RU": "🇷🇺", "TR": "🇹🇷", "SE": "🇸🇪", "FI": "🇫🇮", "CA": "🇨🇦",
+    "JP": "🇯🇵", "SG": "🇸🇬", "HK": "🇭🇰", "KR": "🇰🇷", "IN": "🇮🇳",
+    "IR": "🇮🇷", "AE": "🇦🇪", "BR": "🇧🇷", "AU": "🇦🇺", "CH": "🇨🇭",
+    "AT": "🇦🇹", "PL": "🇵🇱", "IT": "🇮🇹", "ES": "🇪🇸", "UA": "🇺🇦",
+    "CN": "🇨🇳", "TW": "🇹🇼", "VN": "🇻🇳", "TH": "🇹🇭", "ID": "🇮🇩",
+    "MY": "🇲🇾", "ZA": "🇿🇦", "AR": "🇦🇷", "MX": "🇲🇽", "IL": "🇮🇱",
+}
+
+
+def _country_flag(code: str) -> str:
+    """Return flag emoji for a country code, computing regional indicators if unknown."""
+    if not code or len(code) != 2:
+        return ""
+    code = code.upper()
+    if code in _FLAG_MAP:
+        return _FLAG_MAP[code]
+    try:
+        return "".join(chr(ord(c) + 127397) for c in code)
+    except Exception:
+        return ""
 
 
 def _do_copy(text: str) -> None:
@@ -807,7 +888,6 @@ def main() -> None:
         _render_error(rs)
     elif rs["stage"] == "done" and rs.get("result"):
         result: list[EnrichedResult] = rs["result"]
-        _render_metrics(result)
         _render_table(result)
         st.caption(f"⏱  Pipeline completed in {rs.get('elapsed', 0):.1f}s · {len(result)} results")
     elif rs["stage"] == "idle":
