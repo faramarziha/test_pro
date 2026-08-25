@@ -378,16 +378,25 @@ async def _async_pipeline(source_url, text_input, concurrency, timeout, rs) -> N
     if not parsed:
         raise ValueError("Failed to parse any proxy configurations.")
 
-    # Stage 3: Test (fast TCP — no sing-box subprocess per node)
+    # Stage 3: REAL DELAY test (v2rayNG-style, via sing-box)
     rs["stage"] = "testing"
     rs["total"] = len(parsed)
     rs["tested"] = 0
 
+    installer = SingBoxInstaller()
+    sb_path = await installer.ensure_installed()
+    if sb_path:
+        _log(rs, f"  sing-box ready ({Path(sb_path).name})", "info")
+    else:
+        raise RuntimeError("sing-box could not be installed — real delay test unavailable")
+
     tester = SingBoxTester(
         concurrency=concurrency,
         connect_timeout=timeout,
+        singbox_path=sb_path,
+        installer=installer,
     )
-    _log(rs, f"[TEST] Probing {len(parsed)} nodes ({concurrency} workers, fast TCP)...", "stage")
+    _log(rs, f"[TEST] REAL DELAY: testing {len(parsed)} nodes via generate_204 ({concurrency} workers)...", "stage")
 
     def _on_progress(done: int, total: int, _tr) -> None:
         rs["tested"] = done
