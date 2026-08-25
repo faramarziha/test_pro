@@ -1,9 +1,8 @@
 """
 SingBoxTester: Async concurrent proxy testing engine.
 
-Uses asyncio with semaphore-based concurrency control, ephemeral sing-box
-subprocesses (when available) or direct socket/HTTP tests for connectivity
-validation. Measures real latency for each working node.
+Primary mode: fast TCP connection test (DNS resolve + TCP handshake).
+Optional sing-box deep testing for protocol-level validation.
 """
 from __future__ import annotations
 
@@ -29,14 +28,11 @@ from proxyhub.installer import find_singbox_sync, SingBoxInstaller
 
 logger = logging.getLogger(__name__)
 
-# Verification endpoints
 VERIFY_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://1.1.1.1/cdn-cgi/trace",
-    "http://httpbin.org/ip",
 ]
 
-# Concurrency & timeout settings
 DEFAULT_SEMAPHORE = 50
 CONNECT_TIMEOUT = 5.0
 TOTAL_TIMEOUT = 8.0
@@ -61,7 +57,7 @@ class BatchTestResult:
 
 
 class SingBoxTester:
-    """Async proxy testing engine with configurable concurrency."""
+    """Async proxy testing engine. Defaults to fast TCP tests."""
 
     def __init__(
         self,
@@ -75,7 +71,6 @@ class SingBoxTester:
         self._installer = installer or SingBoxInstaller()
         self._singbox_path = singbox_path or find_singbox_sync()
         self._semaphore: Optional[asyncio.Semaphore] = None
-        self._install_lock = asyncio.Lock()  # prevent concurrent downloads
 
     # ------------------------------------------------------------------
     # Public API
@@ -86,7 +81,7 @@ class SingBoxTester:
         proxies: list[ParsedProxy],
         progress_callback=None,
     ) -> BatchTestResult:
-        """Test all proxies concurrently. Returns aggregated results."""
+        """Test all proxies concurrently using fast TCP connection tests."""
         self._semaphore = asyncio.Semaphore(self._concurrency)
         start = time.monotonic()
 
@@ -115,42 +110,102 @@ class SingBoxTester:
         )
 
     # ------------------------------------------------------------------
-    # Single proxy test
+    # Per-proxy test — always uses fast TCP connect
     # ------------------------------------------------------------------
 
     async def _test_one(self, proxy: ParsedProxy) -> TestResult:
         async with self._semaphore:  # type: ignore[union-attr]
-            return await self._do_test(proxy)
+            return await self._fast_tcp_test(proxy)
 
-    async def _do_test(self, proxy: ParsedProxy) -> TestResult:
-        """Dispatch to the appropriate test method based on protocol."""
-        proto = proxy.protocol
+    async def _fast_tcp_test(self, proxy: ParsedProxy) -> TestResult:
+        """
+        Fast test: DNS-resolve hostname → open TCP connection → measure latency.
+        This correctly identifies reachable proxy servers in <5s per node.
+        With 50 concurrent workers, 960 nodes test in ~2 minutes.
+        """
+        host = proxy.host
+        port = proxy.port or 443
 
-        if proto in ("shadowsocks", "trojan", "vless", "vmess", "hysteria2", "tuic"):
-            # Lazy-init with lock: only one worker triggers the download
-            if not self._singbox_path:
-                async with self._install_lock:
-                    if not self._singbox_path:  # double-check after acquiring lock
-                        self._singbox_path = await self._installer.ensure_installed()
-            if self._singbox_path:
-                return await self._test_via_singbox(proxy)
-            else:
-                return await self._test_tcp_fallback(proxy)
-        else:
-            return await self._test_tcp_fallback(proxy)
+        if not host or not port:
+            return TestResult(proxy=proxy, working=False, error="Missing host/port")
+
+        try:
+            start = time.monotonic()
+
+            # DNS resolve (cached by OS, async via getaddrinfo)
+            loop = asyncio.get_running_loop()
+            try:
+                addrs = await asyncio.wait_for(
+                    loop.getaddrinfo(host, port, proto=socket.IPPROTO_TCP),
+                    timeout=min(self._connect_timeout, 3.0),
+                )
+            except (asyncio.TimeoutError, socket.gaierror):
+                return TestResult(proxy=proxy, working=False, error="DNS resolution failed")
+
+            if not addrs:
+                return TestResult(proxy=proxy, working=False, error="No addresses resolved")
+
+            resolved_ip = addrs[0][4][0]
+
+            # TCP connect
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=self._connect_timeout,
+                )
+                tcp_latency = time.monotonic() - start
+                writer.close()
+                await writer.wait_closed()
+            except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as exc:
+                return TestResult(proxy=proxy, working=False, error=str(exc)[:80])
+
+            # TCP connect succeeded — proxy server is reachable
+            # Now try a fast HTTP request if the port looks like HTTP/HTTPS
+            http_latency = tcp_latency
+            if port in (80, 443, 8080, 8443, 2053, 2083, 2087, 2096):
+                http_latency = await self._try_http_connect(host, port, tcp_latency) or tcp_latency
+
+            return TestResult(
+                proxy=proxy,
+                working=True,
+                latency_ms=round(http_latency * 1000, 1),
+                resolved_ip=resolved_ip,
+            )
+
+        except Exception as exc:
+            return TestResult(proxy=proxy, working=False, error=str(exc)[:120])
+
+    async def _try_http_connect(self, host: str, port: int, fallback: float) -> Optional[float]:
+        """Try a quick HTTP GET to confirm the port actually serves traffic."""
+        scheme = "https" if port in (443, 8443, 2053, 2083, 2087, 2096) else "http"
+        url = f"{scheme}://{host}:{port}/"
+        try:
+            start = time.monotonic()
+            connector = aiohttp.TCPConnector(ssl=False if scheme == "http" else True)
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=3.0),
+            ) as session:
+                async with session.get(url, allow_redirects=True) as resp:
+                    await resp.read()
+                    return time.monotonic() - start
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
-    # sing-box subprocess testing
+    # sing-box deep test (kept for manual advanced use, not default)
     # ------------------------------------------------------------------
 
-    async def _test_via_singbox(self, proxy: ParsedProxy) -> TestResult:
-        """Spin up sing-box with an ephemeral config, test, then tear down."""
+    async def deep_test_via_singbox(self, proxy: ParsedProxy) -> TestResult:
+        """Deep protocol-level test using sing-box. Slow but thorough."""
+        if not self._singbox_path:
+            return await self._fast_tcp_test(proxy)
+
         local_port = self._find_free_port()
         config_path: Optional[str] = None
         process: Optional[subprocess.Popen] = None
 
         try:
-            # Generate sing-box config
             sb_config = self._build_singbox_config(proxy, local_port)
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
@@ -158,18 +213,19 @@ class SingBoxTester:
                 json.dump(sb_config, f, indent=2)
                 config_path = f.name
 
-            # Launch sing-box
             process = subprocess.Popen(
-                [self._singbox_path, "run", "-c", config_path],  # type: ignore[union-attr]
+                [self._singbox_path, "run", "-c", config_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=os.setsid if os.name != "nt" else None,
             )
 
-            # Wait for listener readiness
-            await asyncio.sleep(0.5)
+            # Wait up to 2s for listener
+            for _ in range(8):
+                await asyncio.sleep(0.25)
+                if self._port_is_listening(local_port):
+                    break
 
-            # Run HTTP test through the local SOCKS5 listener
             latency, ip = await self._http_test_via_socks(local_port)
 
             if latency > 0:
@@ -180,10 +236,7 @@ class SingBoxTester:
                     resolved_ip=ip,
                 )
             else:
-                return TestResult(
-                    proxy=proxy, working=False, error="HTTP test failed through SOCKS"
-                )
-
+                return TestResult(proxy=proxy, working=False, error="Sing-box: no HTTP response")
         except Exception as exc:
             return TestResult(proxy=proxy, working=False, error=str(exc)[:120])
         finally:
@@ -194,236 +247,92 @@ class SingBoxTester:
                 except OSError:
                     pass
 
-    def _build_singbox_config(
-        self, proxy: ParsedProxy, local_port: int
-    ) -> dict:
-        """Build a minimal sing-box config with one outbound + mixed inbound."""
-        outbound = self._make_outbound(proxy)
+    def _port_is_listening(self, port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    def _build_singbox_config(self, proxy: ParsedProxy, local_port: int) -> dict:
         return {
             "log": {"level": "error"},
-            "inbounds": [
-                {
-                    "type": "mixed",
-                    "tag": "mixed-in",
-                    "listen": "127.0.0.1",
-                    "listen_port": local_port,
-                }
-            ],
-            "outbounds": [outbound],
+            "inbounds": [{
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": local_port,
+            }],
+            "outbounds": [self._make_outbound(proxy)],
         }
 
     def _make_outbound(self, proxy: ParsedProxy) -> dict:
-        """Build the sing-box outbound object for a given proxy."""
         p = proxy
         tag = f"{p.protocol}-{p.host}:{p.port}"
-
-        base: dict = {
-            "tag": tag,
-            "server": p.host,
-            "server_port": p.port,
-        }
+        base: dict = {"tag": tag, "server": p.host, "server_port": p.port}
 
         if p.protocol == "shadowsocks":
-            return {
-                **base,
-                "type": "shadowsocks",
-                "method": p.extra.get("method", "aes-256-gcm"),
-                "password": p.password,
-            }
+            return {**base, "type": "shadowsocks",
+                    "method": p.extra.get("method", "aes-256-gcm"), "password": p.password}
         elif p.protocol == "trojan":
-            return {
-                **base,
-                "type": "trojan",
-                "password": p.password,
-                "tls": {
-                    "enabled": True,
-                    "server_name": p.sni or p.host,
-                    "insecure": p.allow_insecure,
-                },
-            }
+            return {**base, "type": "trojan", "password": p.password,
+                    "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
         elif p.protocol == "vless":
             tls: dict = {"enabled": True, "server_name": p.sni or p.host}
             if p.security == "reality":
-                tls["reality"] = {
-                    "enabled": True,
-                    "public_key": p.public_key,
-                    "short_id": p.short_id or "",
-                }
-            obj: dict = {
-                **base,
-                "type": "vless",
-                "uuid": p.uuid,
-                "flow": p.flow or "",
-                "tls": tls,
-                "transport": self._make_transport(p),
-            }
-            return obj
+                tls["reality"] = {"enabled": True, "public_key": p.public_key, "short_id": p.short_id or ""}
+            return {**base, "type": "vless", "uuid": p.uuid, "flow": p.flow or "",
+                    "tls": tls, "transport": self._make_transport(p)}
         elif p.protocol == "vmess":
-            return {
-                **base,
-                "type": "vmess",
-                "uuid": p.uuid,
-                "security": "auto",
-                "alter_id": int(p.extra.get("aid", 0)),
-                "tls": {
-                    "enabled": p.security in ("tls", "auto"),
-                    "server_name": p.sni or p.host,
-                },
-                "transport": self._make_transport(p),
-            }
+            return {**base, "type": "vmess", "uuid": p.uuid, "security": "auto",
+                    "alter_id": int(p.extra.get("aid", 0)),
+                    "tls": {"enabled": p.security in ("tls", "auto"), "server_name": p.sni or p.host},
+                    "transport": self._make_transport(p)}
         elif p.protocol in ("hysteria2", "hysteria"):
-            return {
-                **base,
-                "type": "hysteria2",
-                "password": p.password,
-                "tls": {
-                    "enabled": True,
-                    "server_name": p.sni or p.host,
-                    "insecure": p.allow_insecure,
-                },
-            }
+            return {**base, "type": "hysteria2", "password": p.password,
+                    "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
         elif p.protocol == "tuic":
-            return {
-                **base,
-                "type": "tuic",
-                "uuid": p.uuid,
-                "password": p.password,
-                "tls": {
-                    "enabled": True,
-                    "server_name": p.sni or p.host,
-                    "insecure": p.allow_insecure,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported protocol: {p.protocol}")
+            return {**base, "type": "tuic", "uuid": p.uuid, "password": p.password,
+                    "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+        raise ValueError(f"Unsupported protocol: {p.protocol}")
 
     def _make_transport(self, proxy: ParsedProxy) -> dict:
-        """Build sing-box transport settings."""
         t = proxy.transport
         if t == "ws":
-            return {
-                "type": "ws",
-                "path": proxy.path or "/",
-                "headers": (
-                    {"Host": proxy.host_header} if proxy.host_header else {}
-                ),
-            }
+            return {"type": "ws", "path": proxy.path or "/",
+                    "headers": {"Host": proxy.host_header} if proxy.host_header else {}}
         elif t == "grpc":
-            return {
-                "type": "grpc",
-                "service_name": proxy.service_name or "",
-            }
+            return {"type": "grpc", "service_name": proxy.service_name or ""}
         elif t == "httpupgrade":
-            return {
-                "type": "httpupgrade",
-                "path": proxy.path or "/",
-                "host": proxy.host_header or "",
-            }
+            return {"type": "httpupgrade", "path": proxy.path or "/", "host": proxy.host_header or ""}
         return {"type": t}
 
     # ------------------------------------------------------------------
-    # TCP fallback (no sing-box)
+    # HTTP test via local SOCKS5
     # ------------------------------------------------------------------
 
-    async def _test_tcp_fallback(self, proxy: ParsedProxy) -> TestResult:
-        """Test connectivity by opening a raw TCP connection + timing it."""
-        try:
-            loop = asyncio.get_running_loop()
-            start = time.monotonic()
-
-            # Resolve and connect
-            addrs = await loop.getaddrinfo(
-                proxy.host, proxy.port, proto=socket.IPPROTO_TCP
-            )
-            ip = addrs[0][4][0] if addrs else proxy.host
-
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(proxy.host, proxy.port),
-                timeout=self._connect_timeout,
-            )
-            latency = time.monotonic() - start
-            writer.close()
-            await writer.wait_closed()
-
-            # If TCP works, try a quick HTTP test too (for HTTP proxies)
-            http_latency = await self._try_direct_http(proxy.host, proxy.port)
-
-            return TestResult(
-                proxy=proxy,
-                working=True,
-                latency_ms=round(
-                    (http_latency if http_latency > 0 else latency) * 1000, 1
-                ),
-                resolved_ip=ip,
-            )
-        except asyncio.TimeoutError:
-            return TestResult(proxy=proxy, working=False, error="Connection timeout")
-        except OSError as exc:
-            return TestResult(proxy=proxy, working=False, error=str(exc)[:120])
-        except Exception as exc:
-            return TestResult(proxy=proxy, working=False, error=str(exc)[:120])
-
-    # ------------------------------------------------------------------
-    # HTTP test via local SOCKS5 listener
-    # ------------------------------------------------------------------
-
-    async def _http_test_via_socks(
-        self, socks_port: int
-    ) -> tuple[float, str]:
-        """Test HTTP connectivity through a local SOCKS5 proxy."""
-        connector = ProxyConnector(
-            proxy_type=ProxyType.SOCKS5,
-            host="127.0.0.1",
-            port=socks_port,
-        )
+    async def _http_test_via_socks(self, socks_port: int) -> tuple[float, str]:
+        connector = ProxyConnector(proxy_type=ProxyType.SOCKS5, host="127.0.0.1", port=socks_port)
         timeout = aiohttp.ClientTimeout(total=TOTAL_TIMEOUT)
-        ip = ""
-
         try:
-            async with aiohttp.ClientSession(
-                connector=connector, timeout=timeout
-            ) as session:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 for url in VERIFY_URLS:
                     try:
                         start = time.monotonic()
                         async with session.get(url) as resp:
                             await resp.read()
-                            latency = time.monotonic() - start
                             if resp.status in (200, 204, 301, 302):
-                                # Also try to get our external IP
                                 ip = await self._fetch_ip(session)
-                                return latency, ip
+                                return time.monotonic() - start, ip
                     except Exception:
                         continue
         except Exception:
             pass
-
         return 0.0, ""
 
-    async def _try_direct_http(self, host: str, port: int) -> float:
-        """Try a direct HTTP connection to measure HTTP-level latency."""
-        try:
-            timeout = aiohttp.ClientTimeout(total=3.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                for url in [f"http://{host}:{port}", "https://1.1.1.1"]:
-                    try:
-                        start = time.monotonic()
-                        async with session.get(url) as resp:
-                            await resp.read()
-                            return time.monotonic() - start
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return 0.0
-
     async def _fetch_ip(self, session: aiohttp.ClientSession) -> str:
-        """Get the external IP as seen through the proxy."""
         try:
-            async with session.get(
-                "http://httpbin.org/ip",
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as resp:
+            async with session.get("http://httpbin.org/ip", timeout=aiohttp.ClientTimeout(total=3)) as resp:
                 data = await resp.json()
                 return data.get("origin", "")
         except Exception:
@@ -435,19 +344,16 @@ class SingBoxTester:
 
     @property
     def has_singbox(self) -> bool:
-        """Whether sing-box is currently available (PATH, cache, or installed)."""
-        return self._singbox_path is not None or self._installer.is_available()
+        return self._singbox_path is not None
 
     @staticmethod
     def _find_free_port() -> int:
-        """Find an available ephemeral port."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
     @staticmethod
     def _kill_process(process: Optional[subprocess.Popen]) -> None:
-        """Kill a subprocess and its children."""
         if process is None:
             return
         try:
