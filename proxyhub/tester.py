@@ -294,10 +294,13 @@ class SingBoxTester:
                     latency_ms = (time.monotonic() - start) * 1000
 
                     if resp.status in (200, 204):
+                        # Resolve proxy host → IP for geolocation lookup
+                        resolved_ip = await self._resolve_host(proxy.host)
                         return TestResult(
                             proxy=proxy,
                             working=True,
                             latency_ms=round(latency_ms, 1),
+                            resolved_ip=resolved_ip,
                         )
                     return TestResult(
                         proxy=proxy, working=False,
@@ -308,6 +311,17 @@ class SingBoxTester:
         except Exception as exc:
             return TestResult(proxy=proxy, working=False,
                               error=str(exc)[:80])
+
+    async def _resolve_host(self, host: str) -> str:
+        """DNS-resolve a hostname to an IP (OS-cached, cheap for repeats)."""
+        try:
+            loop = asyncio.get_running_loop()
+            addrs = await asyncio.wait_for(
+                loop.getaddrinfo(host, None), timeout=3.0
+            )
+            return addrs[0][4][0] if addrs else ""
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------
     # Outbound builder (same as before, per-protocol)

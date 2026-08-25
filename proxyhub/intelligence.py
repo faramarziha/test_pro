@@ -103,29 +103,40 @@ class IPIntelligenceEngine:
         return results
 
     async def _query_primary(self, ips: list[str]) -> dict[str, IPInfo]:
-        """Query ip-api.com/batch with POST body of IPs."""
-        try:
-            payload = [
-                {
-                    "query": ip,
-                    "fields": "query,status,country,countryCode,city,isp,as,hosting,proxy",
-                }
-                for ip in ips
-            ]
-            async with self._session.post(  # type: ignore[union-attr]
-                self.PRIMARY_URL, json=payload
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        "ip-api.com returned %d, falling back", resp.status
-                    )
-                    return await self._query_fallback(ips)
-                data = await resp.json()
-        except Exception as exc:
-            logger.warning("ip-api.com error: %s, falling back", exc)
-            return await self._query_fallback(ips)
+        """Query ip-api.com/batch with POST body of IPs. Retries on 429."""
+        payload = [
+            {
+                "query": ip,
+                "fields": "query,status,country,countryCode,city,isp,as,hosting,proxy",
+            }
+            for ip in ips
+        ]
 
-        return self._parse_primary_response(data)
+        for attempt in range(3):
+            try:
+                async with self._session.post(  # type: ignore[union-attr]
+                    self.PRIMARY_URL, json=payload
+                ) as resp:
+                    if resp.status == 429:
+                        wait = 5.0 * (attempt + 1)
+                        logger.warning(
+                            "ip-api.com rate-limited (429), waiting %.0fs", wait
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    if resp.status != 200:
+                        logger.warning(
+                            "ip-api.com returned %d, falling back", resp.status
+                        )
+                        return await self._query_fallback(ips)
+                    data = await resp.json()
+                    return self._parse_primary_response(data)
+            except Exception as exc:
+                logger.warning("ip-api.com error: %s (attempt %d)", exc, attempt + 1)
+                await asyncio.sleep(2.0 * (attempt + 1))
+
+        logger.warning("ip-api.com failed after retries, falling back")
+        return await self._query_fallback(ips)
 
     async def _query_fallback(self, ips: list[str]) -> dict[str, IPInfo]:
         """Query freeipapi.com for any IPs not resolved by primary."""
@@ -230,6 +241,18 @@ def _extract_org(asn: str) -> str:
 # Enrichment pipeline
 # ------------------------------------------------------------------
 
+import ipaddress
+
+
+def _is_ip(s: str) -> bool:
+    """Check whether a string is a literal IPv4/IPv6 address."""
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
 async def enrich_test_results(
     test_results: list,  # list[TestResult]
     engine: Optional[IPIntelligenceEngine] = None,
@@ -238,11 +261,16 @@ async def enrich_test_results(
     if engine is None:
         engine = IPIntelligenceEngine()
 
-    # Collect resolved IPs from working nodes
+    # Collect unique IPs for working nodes (resolved IP, or host if literal IP)
     ips_for_lookup: list[str] = []
     for tr in test_results:
-        if tr.working and tr.resolved_ip and tr.resolved_ip != tr.proxy.host:
-            ips_for_lookup.append(tr.resolved_ip)
+        if not tr.working:
+            continue
+        ip = tr.resolved_ip
+        if not ip and _is_ip(tr.proxy.host):
+            ip = tr.proxy.host
+        if ip:
+            ips_for_lookup.append(ip)
 
     # Batch lookup
     ip_map: dict[str, IPInfo] = {}
@@ -252,14 +280,10 @@ async def enrich_test_results(
     enriched: list[EnrichedResult] = []
     for tr in test_results:
         p = tr.proxy
-        ip = tr.resolved_ip or p.host
-        info = ip_map.get(ip, IPInfo(ip=ip))
-
-        # Also try hostname lookup if resolved IP has no data
-        if not info.country and p.host != ip:
-            info2 = ip_map.get(p.host, IPInfo(ip=p.host))
-            if info2.country:
-                info = info2
+        ip = tr.resolved_ip or (p.host if _is_ip(p.host) else "")
+        info = ip_map.get(ip) if ip else None
+        if info is None:
+            info = IPInfo(ip=ip or p.host)
 
         enriched.append(
             EnrichedResult(
@@ -268,7 +292,7 @@ async def enrich_test_results(
                 host=p.host,
                 port=p.port,
                 latency_ms=tr.latency_ms,
-                ip=ip,
+                ip=ip or "—",
                 country=info.country,
                 country_code=info.country_code,
                 city=info.city,

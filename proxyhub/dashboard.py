@@ -1,8 +1,6 @@
 """
-ProxyDashboard: Interactive Streamlit web dashboard.
-
-Threaded pipeline with live native-Streamlit progress (no raw HTML),
-dark glassmorphism theme, and fast TCP-based proxy testing.
+ProxyDashboard — Persian-first UI with stepper progress and clean layout.
+Threaded pipeline + native Streamlit widgets + REAL DELAY testing.
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ from proxyhub.intelligence import (
 )
 
 # ---------------------------------------------------------------------------
-# Logging (file only — never terminal)
+# Logging (file only)
 # ---------------------------------------------------------------------------
 LOG_DIR = Path.home() / ".proxyhub" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,244 +48,192 @@ DEFAULT_URL = (
 )
 
 st.set_page_config(
-    page_title="ProxyHub — Proxy Intelligence",
+    page_title="ProxyHub — تست و تحلیل کانفیگ",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ---------------------------------------------------------------------------
-# Global CSS — everything in one place, NO inline <style> in markdown
+# Global CSS
 # ---------------------------------------------------------------------------
 
 GLOBAL_CSS = """
 <style>
 :root {
-    --bg: #0a0e14;
-    --surface: #131820;
-    --surface2: #1a212b;
-    --border: rgba(255,255,255,0.06);
-    --text: #c8ccd4;
-    --text-dim: #6b7280;
-    --accent: #10b981;
-    --accent2: #06b6d4;
-    --accent-grad: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
-    --red: #ef4444;
-    --amber: #f59e0b;
-    --purple: #8b5cf6;
+    --bg: #0b0f17;
+    --surface: #121826;
+    --surface2: #1a2234;
+    --border: rgba(255,255,255,0.07);
+    --text: #d6dae2;
+    --dim: #7b8494;
+    --green: #22c55e;
+    --cyan: #22d3ee;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --grad: linear-gradient(135deg, #22c55e, #22d3ee);
 }
 
-/* Page background */
-.stApp {
-    background: linear-gradient(160deg, #0a0e14 0%, #0f1724 50%, #0a0e14 100%);
-}
-.stMainBlockContainer { padding-top: 1.5rem !important; }
+.stApp { background: radial-gradient(ellipse at top, #101828 0%, #0b0f17 55%); }
+.stMainBlockContainer { padding-top: 1.2rem !important; max-width: 1400px; }
 
-/* Sidebar */
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #111827 0%, #0f1724 100%) !important;
-    border-right: 1px solid rgba(255,255,255,0.05) !important;
+    background: linear-gradient(180deg, #0f1522 0%, #0b0f17 100%) !important;
+    border-right: 1px solid var(--border) !important;
 }
 
-/* Headers */
-h1 {
-    font-size: 2rem !important;
-    font-weight: 800 !important;
-    letter-spacing: -0.02em !important;
-    background: var(--accent-grad);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    padding-bottom: 0.25rem !important;
+/* Persian-friendly font stack */
+.stApp, .stMarkdown, p, span, div {
+    font-family: "Vazirmatn", "Segoe UI", Tahoma, sans-serif;
 }
-h2 { font-size: 1.15rem !important; font-weight: 700 !important; color: #e5e7eb !important; }
-h3 { font-size: 1rem !important; font-weight: 600 !important; color: #d1d5db !important; }
+
+h1 {
+    font-size: 1.9rem !important; font-weight: 800 !important;
+    background: var(--grad); -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent; background-clip: text;
+    margin-bottom: 0 !important;
+}
 
 /* Buttons */
 .stButton > button {
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    transition: all 0.2s !important;
+    border-radius: 12px !important; font-weight: 700 !important;
     border: 1px solid var(--border) !important;
-    background: var(--surface2) !important;
-    color: var(--text) !important;
+    background: var(--surface2) !important; color: var(--text) !important;
+    transition: all .18s ease !important; font-size: 0.9rem !important;
 }
 .stButton > button:hover {
-    background: rgba(255,255,255,0.08) !important;
-    border-color: rgba(255,255,255,0.15) !important;
+    border-color: rgba(34,197,94,0.4) !important;
+    background: rgba(34,197,94,0.08) !important;
 }
 .stButton > button[kind="primary"] {
-    background: var(--accent-grad) !important;
-    border: none !important;
-    color: #fff !important;
-    box-shadow: 0 4px 20px rgba(16,185,129,0.25);
+    background: var(--grad) !important; border: none !important; color: #062012 !important;
+    box-shadow: 0 6px 24px rgba(34,197,94,0.35);
+    font-size: 1rem !important; padding: 0.55rem 1.4rem !important;
 }
 .stButton > button[kind="primary"]:hover {
-    box-shadow: 0 6px 28px rgba(16,185,129,0.4);
+    box-shadow: 0 8px 32px rgba(34,197,94,0.5); transform: translateY(-1px);
 }
-.stButton > button:disabled {
-    opacity: 0.4 !important;
-    cursor: not-allowed !important;
-}
+.stButton > button:disabled { opacity: .45 !important; }
 
 /* Inputs */
 .stTextInput input, .stTextArea textarea {
-    background: rgba(255,255,255,0.04) !important;
+    background: var(--surface) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
-    color: var(--text) !important;
+    border-radius: 10px !important; color: var(--text) !important;
+    font-size: 0.85rem !important;
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 2px rgba(16,185,129,0.15) !important;
+    border-color: var(--green) !important;
+    box-shadow: 0 0 0 3px rgba(34,197,94,0.12) !important;
 }
 
-/* Dataframe */
-.stDataFrame {
-    border: 1px solid var(--border) !important;
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}
-
-/* Metric cards */
-.metric-card {
-    background: linear-gradient(145deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 14px;
-    padding: 1.2rem 1.4rem;
-    position: relative;
-    overflow: hidden;
-    height: 100%;
-}
-.metric-card::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 3px;
-    background: var(--accent-grad);
-    border-radius: 0 2px 2px 0;
-}
-.metric-card .m-label {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #6b7280;
-    margin-bottom: 0.3rem;
-    font-weight: 600;
-}
-.metric-card .m-value {
-    font-size: 1.65rem;
-    font-weight: 800;
-    color: #e5e7eb;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
-}
-.metric-card .m-sub {
-    font-size: 0.66rem;
-    color: #4b5563;
-    margin-top: 0.2rem;
-}
-
-/* Category badges */
-.badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 0.66rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    white-space: nowrap;
-}
-.badge-residential { background: rgba(16,185,129,0.18); color: #6ee7b7; }
-.badge-datacenter  { background: rgba(59,130,246,0.18); color: #93c5fd; }
-.badge-proxy       { background: rgba(239,68,68,0.18); color: #fca5a5; }
-.badge-business    { background: rgba(139,92,246,0.18); color: #c4b5fd; }
-.badge-unknown     { background: rgba(107,114,128,0.18); color: #9ca3af; }
-
-/* Hero badge */
-.hero-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(16,185,129,0.1);
-    border: 1px solid rgba(16,185,129,0.2);
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 0.7rem;
-    color: #6ee7b7;
-    font-weight: 500;
-    margin-bottom: 0.5rem;
-}
-
-/* Status dot */
-.status-dot {
-    display: inline-block;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    margin-right: 6px;
-    animation: ph-pulse 2s infinite;
-}
-.status-dot.green  { background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,0.5); }
-.status-dot.yellow { background: #f59e0b; box-shadow: 0 0 8px rgba(245,158,11,0.5); }
-.status-dot.red    { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.5); }
-@keyframes ph-pulse {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.35; }
-}
-
-/* Step cards */
-.step-card {
+/* Cards */
+.ph-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.1rem 0.8rem;
-    text-align: center;
-    height: 100%;
+    border-radius: 16px;
+    padding: 1.3rem 1.5rem;
 }
-.step-card .s-icon { font-size: 1.6rem; margin-bottom: 0.4rem; }
-.step-card .s-title { font-weight: 700; font-size: 0.8rem; color: #e5e7eb; margin-bottom: 0.2rem; }
-.step-card .s-desc { font-size: 0.62rem; color: #6b7280; }
+.ph-stat { text-align: center; padding: 1.1rem 0.6rem; }
+.ph-stat .s-num { font-size: 2rem; font-weight: 800; line-height: 1.1; }
+.ph-stat .s-lbl { font-size: 0.72rem; color: var(--dim); margin-top: 0.3rem; letter-spacing: 0.03em; }
 
-/* Welcome hero */
-.welcome-hero {
-    text-align: center;
-    padding: 2.5rem 1rem 1.5rem;
+/* Stepper */
+.ph-stepper { display: flex; align-items: center; gap: 0; margin: 0.4rem 0 1rem; }
+.ph-step { display: flex; align-items: center; flex: 1; }
+.ph-step .dot {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; font-weight: 700; flex-shrink: 0;
+    background: var(--surface2); color: var(--dim);
+    border: 2px solid var(--border);
 }
-.welcome-hero .w-icon { font-size: 3rem; margin-bottom: 0.5rem; }
-.welcome-hero .w-title { font-size: 1.3rem; font-weight: 700; color: #e5e7eb; margin-bottom: 0.3rem; }
-.welcome-hero .w-sub { color: #6b7280; max-width: 480px; margin: 0 auto; font-size: 0.85rem; }
+.ph-step.active .dot {
+    background: var(--grad); color: #062012; border-color: transparent;
+    box-shadow: 0 0 16px rgba(34,197,94,0.45);
+    animation: ph-glow 1.6s ease-in-out infinite;
+}
+.ph-step.done .dot { background: rgba(34,197,94,0.18); color: var(--green); border-color: rgba(34,197,94,0.4); }
+.ph-step .lbl { font-size: 0.74rem; color: var(--dim); margin-left: 8px; white-space: nowrap; }
+.ph-step.active .lbl { color: var(--text); font-weight: 700; }
+.ph-step.done .lbl { color: var(--green); }
+.ph-step .bar { flex: 1; height: 2px; background: var(--border); margin: 0 10px; }
+.ph-step.done .bar { background: rgba(34,197,94,0.5); }
+@keyframes ph-glow {
+    0%,100% { box-shadow: 0 0 10px rgba(34,197,94,0.3); }
+    50%     { box-shadow: 0 0 22px rgba(34,197,94,0.6); }
+}
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; }
+/* Badges */
+.badge {
+    display: inline-block; padding: 3px 11px; border-radius: 20px;
+    font-size: 0.68rem; font-weight: 700; white-space: nowrap;
+}
+.b-res { background: rgba(34,197,94,.16);  color: #86efac; }
+.b-dc  { background: rgba(56,189,248,.16); color: #7dd3fc; }
+.b-vpn { background: rgba(248,113,113,.16);color: #fca5a5; }
+.b-biz { background: rgba(192,132,252,.16);color: #d8b4fe; }
+.b-unk { background: rgba(148,163,184,.16);color: #cbd5e1; }
+
+/* Table rows */
+.ph-row { padding: 7px 4px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.ph-row:hover { background: rgba(255,255,255,0.025); border-radius: 8px; }
+.ph-head {
+    font-size: 0.66rem; letter-spacing: 0.09em; color: var(--dim);
+    font-weight: 700; padding: 4px 4px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.09);
+}
+.ph-name { font-size: 0.8rem; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph-sub  { font-size: 0.66rem; color: var(--dim); }
+.ph-cell { font-size: 0.76rem; color: #aeb6c4; }
+
+/* Hero / welcome */
+.ph-hero { text-align: center; padding: 2.2rem 1rem 1.6rem; }
+.ph-hero .ico { font-size: 3.2rem; margin-bottom: 0.4rem; }
+.ph-hero .ttl { font-size: 1.35rem; font-weight: 800; color: #eef2f7; margin-bottom: 0.35rem; }
+.ph-hero .sub { color: var(--dim); max-width: 520px; margin: 0 auto; font-size: 0.86rem; line-height: 1.8; }
+
+/* Guide cards */
+.ph-guide {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 1.1rem 0.9rem; text-align: center; height: 100%;
+}
+.ph-guide .g-ico { font-size: 1.7rem; margin-bottom: 0.45rem; }
+.ph-guide .g-ttl { font-weight: 800; font-size: 0.84rem; color: #e2e8f0; margin-bottom: 0.25rem; }
+.ph-guide .g-dsc { font-size: 0.68rem; color: var(--dim); line-height: 1.7; }
+
+/* Status pill */
+.ph-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25);
+    color: #86efac; border-radius: 20px; padding: 3px 13px;
+    font-size: 0.7rem; font-weight: 600;
+}
+
+/* Log console */
+.ph-log {
+    background: #0a0e15; border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.8rem 1rem; font-family: "Consolas", monospace;
+    font-size: 0.72rem; color: #8b95a7; line-height: 1.75;
+    max-height: 190px; overflow-y: auto; direction: ltr; text-align: left;
+}
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 
-/* Download buttons */
 .stDownloadButton > button {
-    border-radius: 10px !important;
-    font-weight: 600 !important;
+    border-radius: 10px !important; font-weight: 700 !important;
     background: var(--surface2) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text) !important;
+    border: 1px solid var(--border) !important; color: var(--text) !important;
 }
-.stDownloadButton > button:hover {
-    background: rgba(255,255,255,0.08) !important;
-    border-color: rgba(255,255,255,0.15) !important;
-}
+.stDownloadButton > button:hover { border-color: rgba(34,197,94,0.4) !important; }
 
-/* Expander */
-.stExpander {
-    border: 1px solid var(--border) !important;
-    border-radius: 10px !important;
-    background: var(--surface) !important;
-}
+.stExpander { border: 1px solid var(--border) !important; border-radius: 10px !important; }
+.stCode { background: #0a0e15 !important; border-radius: 8px !important; }
 
-/* Code blocks */
-.stCode {
-    background: #0b0f16 !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
-}
+/* Progress bar */
+.stProgress > div > div > div { background: var(--grad) !important; }
 </style>
 """
 
@@ -295,15 +241,23 @@ h3 { font-size: 1rem !important; font-weight: 600 !important; color: #d1d5db !im
 # Helpers
 # ---------------------------------------------------------------------------
 CATEGORY_BADGE = {
-    "Residential / ISP": "badge-residential",
-    "Datacenter / Hosting": "badge-datacenter",
-    "Public Proxy / VPN": "badge-proxy",
-    "Business / Education": "badge-business",
+    "Residential / ISP": "b-res",
+    "Datacenter / Hosting": "b-dc",
+    "Public Proxy / VPN": "b-vpn",
+    "Business / Education": "b-biz",
+}
+CATEGORY_FA = {
+    "Residential / ISP": "خانگی / ISP",
+    "Datacenter / Hosting": "دیتاسنتر",
+    "Public Proxy / VPN": "پروکسی عمومی / VPN",
+    "Business / Education": "سازمانی / آموزشی",
+    "Unknown": "نامشخص",
 }
 
 def _badge(cat: str) -> str:
-    cls = CATEGORY_BADGE.get(cat, "badge-unknown")
-    return f'<span class="badge {cls}">{cat}</span>'
+    cls = CATEGORY_BADGE.get(cat, "b-unk")
+    label = CATEGORY_FA.get(cat, cat)
+    return f'<span class="badge {cls}">{label}</span>'
 
 
 def _init_run_state() -> dict:
@@ -327,7 +281,6 @@ def _log(rs: dict, msg: str, kind: str = "info") -> None:
     logger.info(msg)
     rs["log_lines"].append((kind, msg))
     rs["message"] = msg
-
 
 # ---------------------------------------------------------------------------
 # Background pipeline
@@ -354,129 +307,133 @@ async def _async_pipeline(source_url, text_input, concurrency, timeout, rs) -> N
     fetcher = SubscriptionFetcher()
     parser = ProxyParser()
 
-    # Stage 1: Fetch
+    # 1 — Fetch
     rs["stage"] = "fetching"
     rs["start_ts"] = time.time()
-    _log(rs, "[FETCH] Downloading subscription...", "stage")
-
+    _log(rs, "[1/4] دریافت سابسکریپشن...", "stage")
     if text_input.strip():
         result = fetcher.parse_text(text_input, source="manual")
     else:
         result = await fetcher.fetch_url(source_url)
-
-    _log(rs, f"  Got {result.proxy_count} configs (Base64: {result.is_base64})", "info")
-
+    _log(rs, f"  {result.proxy_count} کانفیگ دریافت شد (Base64: {result.is_base64})", "info")
     if not result.raw_lines:
-        raise ValueError("No proxy configurations found in the source.")
+        raise ValueError("هیچ کانفیگی در منبع پیدا نشد.")
 
-    # Stage 2: Parse
+    # 2 — Parse
     rs["stage"] = "parsing"
-    _log(rs, "[PARSE] Parsing protocols...", "stage")
+    _log(rs, "[2/4] پردازش کانفیگ‌ها...", "stage")
     parsed = [p for line in result.raw_lines if (p := parser.parse(line))]
-    _log(rs, f"  Parsed {len(parsed)} valid proxies", "info")
-
+    _log(rs, f"  {len(parsed)} کانفیگ معتبر", "info")
     if not parsed:
-        raise ValueError("Failed to parse any proxy configurations.")
+        raise ValueError("هیچ کانفیگی قابل پردازش نبود.")
 
-    # Stage 3: REAL DELAY test (v2rayNG-style, via sing-box)
+    # 3 — REAL DELAY test
     rs["stage"] = "testing"
     rs["total"] = len(parsed)
     rs["tested"] = 0
-
     installer = SingBoxInstaller()
     sb_path = await installer.ensure_installed()
-    if sb_path:
-        _log(rs, f"  sing-box ready ({Path(sb_path).name})", "info")
-    else:
-        raise RuntimeError("sing-box could not be installed — real delay test unavailable")
+    if not sb_path:
+        raise RuntimeError("نصب sing-box ناموفق بود — تست تأخیر واقعی در دسترس نیست.")
+    _log(rs, f"  هسته sing-box آماده است", "info")
 
     tester = SingBoxTester(
-        concurrency=concurrency,
-        connect_timeout=timeout,
-        singbox_path=sb_path,
-        installer=installer,
+        concurrency=concurrency, connect_timeout=timeout,
+        singbox_path=sb_path, installer=installer,
     )
-    _log(rs, f"[TEST] REAL DELAY: testing {len(parsed)} nodes via generate_204 ({concurrency} workers)...", "stage")
+    _log(rs, f"[3/4] تست تأخیر واقعی {len(parsed)} کانفیگ (generate_204)...", "stage")
 
-    def _on_progress(done: int, total: int, _tr) -> None:
+    def _on_progress(done, total, _tr):
         rs["tested"] = done
         rs["total"] = total
         rs["elapsed"] = time.time() - rs["start_ts"]
 
     batch = await tester.test_all(parsed, progress_callback=_on_progress)
     rs["working_count"] = batch.working
-    _log(rs, f"  {batch.working} alive, {batch.dead} dead ({batch.elapsed_seconds:.1f}s)",
-         "done" if batch.working > 0 else "warn")
+    _log(rs, f"  {batch.working} سالم، {batch.dead} خراب ({batch.elapsed_seconds:.0f} ثانیه)",
+         "done" if batch.working else "warn")
 
-    # Stage 4: Enrich
+    # 4 — Enrich
     rs["stage"] = "enriching"
-    _log(rs, "[ENRICH] Querying IP geolocation (ip-api.com batch)...", "stage")
+    _log(rs, "[4/4] تشخیص کشور و نوع IP (ip-api)...", "stage")
     engine = IPIntelligenceEngine()
     enriched = await enrich_test_results(batch.results, engine)
     enriched.sort(key=lambda r: (not r.is_working, r.latency_ms))
-    _log(rs, f"  Enrichment complete — {len(enriched)} results", "done")
+    _log(rs, f"  غنی‌سازی انجام شد — {len(enriched)} نتیجه", "done")
 
-    # Done
     rs["stage"] = "done"
     rs["result"] = enriched
     rs["finished"] = True
     rs["elapsed"] = time.time() - rs["start_ts"]
 
+# ---------------------------------------------------------------------------
+# Stepper
+# ---------------------------------------------------------------------------
+
+STEPS = [
+    ("fetching",  "۱", "دریافت"),
+    ("parsing",   "۲", "پردازش"),
+    ("testing",   "۳", "تست تأخیر"),
+    ("enriching", "۴", "تشخیص IP"),
+]
+
+def _render_stepper(rs: dict) -> None:
+    order = ["fetching", "parsing", "testing", "enriching"]
+    try:
+        idx = order.index(rs["stage"])
+    except ValueError:
+        idx = -1
+
+    html = ['<div class="ph-stepper">']
+    for i, (key, num, label) in enumerate(STEPS):
+        cls = "active" if i == idx else ("done" if i < idx else "")
+        check = "✓" if i < idx else num
+        html.append(
+            f'<div class="ph-step {cls}">'
+            f'<div class="dot">{check}</div>'
+            f'<div class="lbl">{label}</div>'
+            f'<div class="bar"></div>'
+            f'</div>'
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Live progress — NATIVE Streamlit widgets only
+# Live progress
 # ---------------------------------------------------------------------------
 
 def _render_live_progress(rs: dict) -> None:
-    """Live progress using only native Streamlit widgets."""
     total = max(rs.get("total", 0), 1)
     tested = rs.get("tested", 0)
     elapsed = rs.get("elapsed", time.time() - rs.get("start_ts", time.time()))
-
-    stage_icons = {
-        "fetching":  "⬇️",
-        "parsing":   "🔍",
-        "testing":   "🧪",
-        "enriching": "🌍",
-    }
-    stage_labels = {
-        "fetching":  "Fetching subscription",
-        "parsing":   "Parsing configs",
-        "testing":   "Testing proxies",
-        "enriching": "Enriching with IP data",
-        "done":      "Pipeline complete",
-        "error":     "Pipeline failed",
-    }
     stage = rs["stage"]
-    icon = stage_icons.get(stage, "⏳")
-    label = stage_labels.get(stage, "Running")
 
-    # Status header
-    status = st.status(f"{icon}  {label}", state="running", expanded=True)
-    with status:
-        # Progress bar (only meaningful during testing)
-        if stage == "testing" and total > 0:
-            pct = min(tested / total, 1.0)
-            st.progress(pct, text=f"{tested:,} / {total:,} tested ({pct*100:.0f}%)")
+    _render_stepper(rs)
 
-            # Stats row
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Tested", f"{tested:,}")
-            c2.metric("Elapsed", f"{elapsed:.0f}s")
-            if pct > 0.02:
-                eta = (elapsed / pct) - elapsed
-                if eta < 60:
-                    c3.metric("Remaining", f"~{eta:.0f}s")
-                elif eta < 3600:
-                    c3.metric("Remaining", f"~{eta/60:.0f}m")
-                else:
-                    c3.metric("Remaining", f"~{eta/3600:.1f}h")
+    if stage == "testing":
+        pct = min(tested / total, 1.0)
+        st.progress(pct, text=f"تست شده: {tested:,} از {total:,} ({pct*100:.0f}٪)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("تست شده", f"{tested:,}")
+        c2.metric("باقی‌مانده", f"{total - tested:,}")
+        c3.metric("زمان سپری‌شده", f"{elapsed:.0f}s")
+        if pct > 0.02:
+            eta = (elapsed / pct) - elapsed
+            eta_s = f"~{eta:.0f}s" if eta < 60 else (f"~{eta/60:.0f}m" if eta < 3600 else f"~{eta/3600:.1f}h")
+            c4.metric("زمان باقی‌مانده", eta_s)
+    else:
+        msgs = {
+            "fetching": "در حال دریافت سابسکریپشن...",
+            "parsing": "در حال پردازش کانفیگ‌ها...",
+            "enriching": "در حال تشخیص کشور و نوع IP...",
+        }
+        if stage in msgs:
+            st.info(msgs[stage])
 
-        # Log console — use st.code (native, monospace, no HTML issues)
-        logs = rs.get("log_lines", [])
-        if logs:
-            log_text = "\n".join(f"{k:>5} | {msg}" for k, msg in logs[-15:])
-            st.code(log_text, language="text")
+    logs = rs.get("log_lines", [])
+    if logs:
+        log_text = "\n".join(f"{msg}" for _, msg in logs[-14:])
+        st.markdown(f'<div class="ph-log">{log_text}</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -484,40 +441,41 @@ def _render_live_progress(rs: dict) -> None:
 
 def _render_sidebar():
     st.sidebar.markdown(
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.25rem;">'
-        '<span style="font-size:1.6rem;">⚡</span>'
-        '<span style="font-size:1.1rem;font-weight:800;color:#10b981;">ProxyHub</span>'
-        '</div>',
+        '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 2px;">'
+        '<span style="font-size:1.7rem;">⚡</span>'
+        '<span style="font-size:1.15rem;font-weight:800;color:#22c55e;">ProxyHub</span>'
+        '</div>'
+        '<div style="font-size:0.7rem;color:#7b8494;">تست و تحلیل کانفیگ‌های پروکسی</div>',
         unsafe_allow_html=True,
     )
-    st.sidebar.caption("Proxy Intelligence Engine")
+    st.sidebar.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    with st.sidebar.expander("📡  Subscription Source", expanded=True):
-        source_url = st.text_input(
-            "URL", value=DEFAULT_URL, key="source_url",
-            placeholder="https://...", label_visibility="collapsed",
-        )
-        text_input = st.text_area(
-            "Or paste raw configs", height=90, key="text_input",
-            placeholder="vless://...\nvmess://...", label_visibility="collapsed",
-        )
+    with st.sidebar.expander("📡 منبع کانفیگ", expanded=True):
+        source_url = st.text_input("آدرس سابسکریپشن", value=DEFAULT_URL,
+                                   key="source_url", label_visibility="collapsed")
+        st.caption("یا کانفیگ‌ها را دستی وارد کنید:")
+        text_input = st.text_area("کانفیگ دستی", height=90, key="text_input",
+                                  placeholder="vless://...\nvmess://...",
+                                  label_visibility="collapsed")
 
-    with st.sidebar.expander("⚙️  Test Settings", expanded=True):
-        concurrency = st.slider("Workers", 10, 200, 50, 10,
-                                help="More = faster, heavier CPU")
-        timeout = st.slider("Timeout (s)", 2.0, 10.0, 5.0, 0.5,
-                            help="Per connection attempt")
+    with st.sidebar.expander("⚙️ تنظیمات پیشرفته", expanded=False):
+        concurrency = st.slider("تست‌های همزمان", 10, 200, 50, 10,
+                                help="بیشتر = سریع‌تر ولی سنگین‌تر")
+        timeout = st.slider("تایم‌اوت (ثانیه)", 2.0, 10.0, 5.0, 0.5,
+                            help="حداکثر انتظار برای هر کانفیگ")
 
     st.sidebar.markdown("---")
     path = find_singbox_sync()
-    dot_cls = "green" if path else "yellow"
-    dot_text = "sing-box ready" if path else "sing-box: auto-install on demand"
+    ok = bool(path)
+    bg = "rgba(34,197,94,0.1)" if ok else "rgba(251,191,36,0.1)"
+    bd = "rgba(34,197,94,0.25)" if ok else "rgba(251,191,36,0.25)"
+    fg = "#86efac" if ok else "#fbbf24"
+    msg = "● هسته تست آماده" if ok else "● هسته در اولین اجرا نصب می‌شود"
     st.sidebar.markdown(
-        f'<div style="font-size:0.75rem;color:#9ca3af;">'
-        f'<span class="status-dot {dot_cls}"></span>{dot_text}</div>',
+        f'<span class="ph-pill" style="background:{bg};'
+        f'border-color:{bd};color:{fg};">{msg}</span>',
         unsafe_allow_html=True,
     )
-    st.sidebar.caption(f"Log: {LOG_FILE}")
 
     return source_url, text_input, concurrency, timeout
 
@@ -530,25 +488,20 @@ def _render_header(rs: dict) -> None:
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        st.markdown('<div class="hero-badge">⚡ PROXY INTELLIGENCE HUB</div>',
-                    unsafe_allow_html=True)
-        st.title("ProxyHub")
-        st.caption("Fetch, test, enrich & categorize thousands of proxy configs.")
-
+        st.title("⚡ ProxyHub")
+        st.caption("دریافت، تست واقعی، تشخیص IP و دسته‌بندی کانفیگ‌های پروکسی — همه در یک‌جا")
     with c2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        col_a, col_b = st.columns(2)
-        with col_a:
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+        ca, cb = st.columns([1.4, 1])
+        with ca:
             if st.button(
-                "▶  Run" if not running else "⏳  Running…",
-                type="primary",
-                use_container_width=True,
-                disabled=running,
-                key="btn_run",
+                "🚀  شروع تست" if not running else "⏳  در حال اجرا...",
+                type="primary", use_container_width=True,
+                disabled=running, key="btn_run",
             ):
                 st.session_state._trigger_run = True
-        with col_b:
-            if st.button("↻  Clear", use_container_width=True, key="btn_clear"):
+        with cb:
+            if st.button("↻ پاک‌سازی", use_container_width=True, key="btn_clear"):
                 st.session_state._run_state = _init_run_state()
                 st.session_state._thread = None
                 st.session_state._last_error = None
@@ -556,88 +509,79 @@ def _render_header(rs: dict) -> None:
                 st.stop()
 
 # ---------------------------------------------------------------------------
-# Metric cards
+# Welcome
 # ---------------------------------------------------------------------------
 
-def _render_metrics(enriched: list[EnrichedResult]) -> None:
-    if not enriched:
-        return
-    working = [r for r in enriched if r.is_working]
-    dead = len(enriched) - len(working)
-    avg_ms = sum(r.latency_ms for r in working) / len(working) if working else 0
-    cats: dict[str, int] = {}
-    for r in working:
-        cats[r.category] = cats.get(r.category, 0) + 1
-    protocols = len({r.protocol for r in enriched})
-    countries = len({r.country for r in working if r.country})
-    success_pct = len(working) / max(len(enriched), 1) * 100
+def _render_welcome() -> None:
+    st.markdown(
+        '<div class="ph-hero">'
+        '<div class="ico">🌐</div>'
+        '<div class="ttl">آماده تست کانفیگ‌های شما</div>'
+        '<div class="sub">با دکمه «🚀 شروع تست»، همه کانفیگ‌های سابسکریپشن با روش '
+        '<b>تأخیر واقعی</b> (مثل v2rayNG) بررسی می‌شوند و کانفیگ‌های سالم با '
+        'کشور، نوع IP و تأخیر واقعی نمایش داده می‌شوند.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
-    cols = st.columns(6)
-    metrics = [
-        ("TOTAL", str(len(enriched)), f"{protocols} protocols"),
-        ("WORKING", str(len(working)), f"{success_pct:.0f}% success"),
-        ("DEAD", str(dead), ""),
-        ("AVG LATENCY", f"{avg_ms:.0f} ms",
-         f"best {min((r.latency_ms for r in working), default=0):.0f}ms"),
-        ("RESIDENTIAL", str(cats.get("Residential / ISP", 0)),
-         f"{countries} countries"),
-        ("DATACENTER", str(cats.get("Datacenter / Hosting", 0)), ""),
+    c1, c2, c3, c4 = st.columns(4)
+    guides = [
+        ("📡", "۱. دریافت", "سابسکریپشن به‌صورت خودکار دانلود و دیکد می‌شود (Base64 هم پشتیبانی می‌شود)"),
+        ("🧪", "۲. تست واقعی", "هر کانفیگ از داخل تونل به generate_204 وصل می‌شود — دقیقاً مثل v2rayNG"),
+        ("🌍", "۳. تشخیص IP", "کشور، شهر، ISP و نوع شبکه (خانگی/دیتاسنتر/VPN) شناسایی می‌شود"),
+        ("📋", "۴. کپی و خروجی", "کپی تک‌تک کانفیگ‌ها یا خروجی TXT و JSON"),
     ]
-    for col, (label, value, sub) in zip(cols, metrics):
+    for col, (ico, ttl, dsc) in zip([c1, c2, c3, c4], guides):
         with col:
             st.markdown(
-                f'<div class="metric-card">'
-                f'<div class="m-label">{label}</div>'
-                f'<div class="m-value">{value}</div>'
-                f'<div class="m-sub">{sub}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+                f'<div class="ph-guide"><div class="g-ico">{ico}</div>'
+                f'<div class="g-ttl">{ttl}</div><div class="g-dsc">{dsc}</div></div>',
+                unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Results table
+# Results
 # ---------------------------------------------------------------------------
 
 def _render_table(enriched: list[EnrichedResult]) -> None:
     if not enriched:
         return
 
-    st.markdown("---")
-
-    # ── Stats cards (TOTAL / ALIVE / DEAD) ──
     working = [r for r in enriched if r.is_working]
     dead = len(enriched) - len(working)
-    sc1, sc2, sc3 = st.columns(3)
-    with sc1:
-        st.markdown(
-            '<div class="metric-card"><div class="m-label">TOTAL</div>'
-            f'<div class="m-value">{len(enriched)}</div></div>',
-            unsafe_allow_html=True)
-    with sc2:
-        st.markdown(
-            '<div class="metric-card"><div class="m-label">ALIVE</div>'
-            f'<div class="m-value" style="color:#10b981">{len(working)}</div></div>',
-            unsafe_allow_html=True)
-    with sc3:
-        st.markdown(
-            '<div class="metric-card"><div class="m-label">DEAD</div>'
-            f'<div class="m-value" style="color:#ef4444">{dead}</div></div>',
-            unsafe_allow_html=True)
 
-    # ── Filter row ──
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    # Stats
+    s1, s2, s3, s4 = st.columns(4)
+    cards = [
+        (len(enriched), "کل کانفیگ‌ها", "#e2e8f0"),
+        (len(working), "سالم ✓", "#22c55e"),
+        (dead, "خراب ✗", "#f87171"),
+        (f"{len(working)/max(len(enriched),1)*100:.0f}٪", "نرخ موفقیت", "#22d3ee"),
+    ]
+    for col, (num, lbl, color) in zip([s1, s2, s3, s4], cards):
+        with col:
+            st.markdown(
+                f'<div class="ph-card ph-stat">'
+                f'<div class="s-num" style="color:{color}">{num}</div>'
+                f'<div class="s-lbl">{lbl}</div></div>',
+                unsafe_allow_html=True)
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    # Filters
     f1, f2 = st.columns([2, 3])
     with f1:
-        search = st.text_input("Search", placeholder="جستجو (اسم، سرور، کشور)...",
+        search = st.text_input("جستجو", placeholder="🔍 جستجو (نام، سرور، کشور)...",
                                key="fs", label_visibility="collapsed")
     with f2:
         all_cats = sorted({r.category for r in enriched})
-        sel_cats = st.pills("Categories", all_cats, selection_mode="multi",
-                            key="fpills", label_visibility="collapsed")
+        cat_labels = [CATEGORY_FA.get(c, c) for c in all_cats]
+        label_to_cat = {CATEGORY_FA.get(c, c): c for c in all_cats}
+        sel_labels = st.pills("دسته‌بندی", cat_labels, selection_mode="multi",
+                              key="fpills", label_visibility="collapsed")
+        sel_cats = [label_to_cat[l] for l in (sel_labels or [])]
 
     working_only = st.checkbox("فقط کانفیگ‌های سالم", value=False, key="fwork")
 
-    # ── Apply filters ──
     rows = []
     for r in enriched:
         if working_only and not r.is_working:
@@ -655,139 +599,122 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         st.info("نتیجه‌ای با فیلترهای فعلی پیدا نشد.")
         return
 
-    # ── Table header ──
-    h1, h2, h3, h4, h5, h6 = st.columns(
-        [2.6, 1.2, 0.9, 1.5, 0.9, 0.8], vertical_alignment="center")
-    h1.markdown("**NAME**")
-    h2.markdown("**COUNTRY**")
-    h3.markdown("**PING**")
-    h4.markdown("**TYPE**")
-    h5.markdown("**STATUS**")
-    h6.markdown("**COPY**")
-    st.markdown('<div style="border-top:1px solid rgba(255,255,255,0.08);margin:4px 0 8px;"></div>',
-                unsafe_allow_html=True)
+    # Header
+    h = st.columns([2.7, 1.3, 0.9, 1.4, 0.7, 0.8], vertical_alignment="center")
+    for col, title in zip(h, ["نام کانفیگ", "کشور", "تأخیر", "نوع شبکه", "وضعیت", "کپی"]):
+        col.markdown(f'<div class="ph-head">{title}</div>', unsafe_allow_html=True)
 
-    # ── Pagination ──
-    PAGE_SIZE = 20
-    total_pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    # Pagination
+    PAGE = 20
+    total_pages = max(1, (len(rows) + PAGE - 1) // PAGE)
     if "table_page" not in st.session_state:
         st.session_state.table_page = 0
     st.session_state.table_page = min(st.session_state.table_page, total_pages - 1)
     page = st.session_state.table_page
-    page_rows = rows[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    page_rows = rows[page * PAGE:(page + 1) * PAGE]
 
-    # ── Rows ──
+    # Rows
     for i, r in enumerate(page_rows):
-        c1, c2, c3, c4, c5, c6 = st.columns(
-            [2.6, 1.2, 0.9, 1.5, 0.9, 0.8], vertical_alignment="center")
+        c = st.columns([2.7, 1.3, 0.9, 1.4, 0.7, 0.8], vertical_alignment="center")
         name = _config_name(r)
-        c1.markdown(f"<span style='font-size:0.8rem;color:#d1d5db;'>{name}</span>",
-                    unsafe_allow_html=True)
-        country = r.country or "—"
-        flag = _country_flag(r.country_code) if r.country_code else ""
-        c2.markdown(f"<span style='font-size:0.78rem;color:#9ca3af;'>{flag} {country}</span>",
-                    unsafe_allow_html=True)
-        ping = f"{r.latency_ms:.0f} ms" if r.is_working and r.latency_ms > 0 else "—"
-        c3.markdown(f"<span style='font-size:0.78rem;color:#9ca3af;'>{ping}</span>",
-                    unsafe_allow_html=True)
-        c4.markdown(_badge(r.category), unsafe_allow_html=True)
-        status_icon = "🟢" if r.is_working else "🔴"
-        c5.markdown(f"<span style='font-size:0.85rem;'>{status_icon}</span>",
-                    unsafe_allow_html=True)
-        if c6.button("Copy", key=f"cpy_{page}_{i}", use_container_width=True):
+        proto = r.protocol.lower()
+        with c[0]:
+            st.markdown(
+                f'<div class="ph-row"><div class="ph-name">{name}</div>'
+                f'<div class="ph-sub">{proto} · {r.host}:{r.port}</div></div>',
+                unsafe_allow_html=True)
+        flag = _country_flag(r.country_code)
+        c[1].markdown(f'<div class="ph-cell">{flag} {r.country or "—"}</div>',
+                      unsafe_allow_html=True)
+        ping = f"{r.latency_ms:.0f} ms" if (r.is_working and r.latency_ms > 0) else "—"
+        ping_color = "#22c55e" if r.is_working and r.latency_ms < 300 else ("#fbbf24" if r.is_working else "#7b8494")
+        c[2].markdown(f'<div class="ph-cell" style="color:{ping_color};font-weight:700">{ping}</div>',
+                      unsafe_allow_html=True)
+        c[3].markdown(_badge(r.category), unsafe_allow_html=True)
+        c[4].markdown(f'<div style="font-size:0.9rem">{"🟢" if r.is_working else "🔴"}</div>',
+                      unsafe_allow_html=True)
+        if c[5].button("کپی", key=f"cpy_{page}_{i}", use_container_width=True):
             _do_copy(r.proxy_raw)
             st.session_state.last_copied = r.proxy_raw
-            st.toast("Copied ✓", icon="📋")
-        st.markdown('<div style="border-bottom:1px solid rgba(255,255,255,0.04);margin:2px 0;"></div>',
-                    unsafe_allow_html=True)
+            st.toast("کپی شد ✓", icon="📋")
 
-    # ── Pagination controls ──
+    # Pagination
     if total_pages > 1:
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        pc1, pc2, pc3 = st.columns([1, 2, 1])
-        with pc1:
-            if st.button("◀  Prev", disabled=page == 0, use_container_width=True):
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        p1, p2, p3 = st.columns([1, 2, 1])
+        with p1:
+            if st.button("▶ قبلی", disabled=page == 0, use_container_width=True):
                 st.session_state.table_page -= 1
                 st.rerun()
                 st.stop()
-        with pc2:
+        with p2:
             st.markdown(
-                f"<div style='text-align:center;color:#6b7280;font-size:0.78rem;padding-top:0.5rem;'>"
-                f"Page {page + 1} / {total_pages} · {len(rows):,} results</div>",
+                f'<div style="text-align:center;color:#7b8494;font-size:0.76rem;padding-top:0.55rem;">'
+                f'صفحه {page + 1} از {total_pages} — {len(rows):,} نتیجه</div>',
                 unsafe_allow_html=True)
-        with pc3:
-            if st.button("Next  ▶", disabled=page >= total_pages - 1, use_container_width=True):
+        with p3:
+            if st.button("بعدی ◀", disabled=page >= total_pages - 1, use_container_width=True):
                 st.session_state.table_page += 1
                 st.rerun()
                 st.stop()
 
-    # ── Last copied fallback (works in every environment) ──
+    # Last copied fallback
     last = st.session_state.get("last_copied")
     if last:
-        with st.expander("📋  آخرین کانفیگ کپی‌شده", expanded=False):
+        with st.expander("📋 آخرین کانفیگ کپی‌شده"):
             st.code(last, language=None)
 
-    # ── Bulk export ──
-    st.markdown("---")
-    st.subheader("💾  Export")
+    # Export
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    st.subheader("💾 خروجی")
     working_raws = [r.proxy_raw for r in rows if r.is_working]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    ex1, ex2, ex3 = st.columns(3)
-    with ex1:
-        st.download_button("📄  TXT Subscription", "\n".join(working_raws),
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        st.download_button("📄 خروجی TXT (سابسکریپشن)", "\n".join(working_raws),
                            f"proxyhub_{ts}.txt", "text/plain",
                            use_container_width=True, disabled=not working_raws)
-    with ex2:
+    with e2:
         json_out = json.dumps([
             {"protocol": r.protocol, "host": r.host, "port": r.port,
              "latency_ms": r.latency_ms, "country": r.country, "city": r.city,
              "isp": r.isp, "category": r.category, "config": r.proxy_raw}
             for r in rows if r.is_working
         ], indent=2, ensure_ascii=False)
-        st.download_button("📊  JSON Report", json_out,
+        st.download_button("📊 خروجی JSON", json_out,
                            f"proxyhub_{ts}.json", "application/json",
                            use_container_width=True, disabled=not working_raws)
-    with ex3:
+    with e3:
         by_cat: dict[str, list[str]] = {}
         for r in rows:
             if r.is_working:
                 by_cat.setdefault(r.category, []).append(r.proxy_raw)
-        cat_txt = "\n\n".join(f"# {c}\n" + "\n".join(cfgs) for c, cfgs in by_cat.items())
-        st.download_button("📂  By Category", cat_txt,
+        cat_txt = "\n\n".join(f"# {CATEGORY_FA.get(c, c)}\n" + "\n".join(cfgs)
+                              for c, cfgs in by_cat.items())
+        st.download_button("📂 خروجی بر اساس دسته", cat_txt,
                            f"proxyhub_cats_{ts}.txt", "text/plain",
                            use_container_width=True, disabled=not by_cat)
 
 
 def _config_name(r: EnrichedResult) -> str:
-    """Extract a display name from the raw config fragment, fallback to host."""
     raw = r.proxy_raw
     if "#" in raw:
         from urllib.parse import unquote
         name = unquote(raw.split("#", 1)[1]).strip()
         if name:
-            return name[:40]
-    return f"{r.protocol} · {r.host}:{r.port}"[:40]
+            return name[:42]
+    return f"{r.host}:{r.port}"[:42]
 
 
-_FLAG_MAP = {
-    "US": "🇺🇸", "DE": "🇩🇪", "FR": "🇫🇷", "GB": "🇬🇧", "NL": "🇳🇱",
-    "RU": "🇷🇺", "TR": "🇹🇷", "SE": "🇸🇪", "FI": "🇫🇮", "CA": "🇨🇦",
-    "JP": "🇯🇵", "SG": "🇸🇬", "HK": "🇭🇰", "KR": "🇰🇷", "IN": "🇮🇳",
-    "IR": "🇮🇷", "AE": "🇦🇪", "BR": "🇧🇷", "AU": "🇦🇺", "CH": "🇨🇭",
-    "AT": "🇦🇹", "PL": "🇵🇱", "IT": "🇮🇹", "ES": "🇪🇸", "UA": "🇺🇦",
-    "CN": "🇨🇳", "TW": "🇹🇼", "VN": "🇻🇳", "TH": "🇹🇭", "ID": "🇮🇩",
-    "MY": "🇲🇾", "ZA": "🇿🇦", "AR": "🇦🇷", "MX": "🇲🇽", "IL": "🇮🇱",
-}
-
+_FLAG_OVERRIDES = {"UK": "🇬🇧", "RU": "🇷🇺"}
 
 def _country_flag(code: str) -> str:
-    """Return flag emoji for a country code, computing regional indicators if unknown."""
     if not code or len(code) != 2:
         return ""
     code = code.upper()
-    if code in _FLAG_MAP:
-        return _FLAG_MAP[code]
+    if code in _FLAG_OVERRIDES:
+        return _FLAG_OVERRIDES[code]
     try:
         return "".join(chr(ord(c) + 127397) for c in code)
     except Exception:
@@ -802,40 +729,6 @@ def _do_copy(text: str) -> None:
         pass
 
 # ---------------------------------------------------------------------------
-# Welcome
-# ---------------------------------------------------------------------------
-
-def _render_welcome() -> None:
-    st.markdown(
-        '<div class="welcome-hero">'
-        '<div class="w-icon">🌐</div>'
-        '<div class="w-title">Ready to analyze your proxies</div>'
-        '<div class="w-sub">Click <strong style="color:#10b981;">▶ Run</strong> to fetch, test '
-        'and enrich up to 2,000 proxy configurations with fast concurrent validation.</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    steps = [
-        ("⬇️", "Fetch", "Download + Base64 decode"),
-        ("🔍", "Parse", "VLESS · VMess · Trojan · SS · Hysteria2 · TUIC"),
-        ("🧪", "Test", "Fast concurrent TCP probes"),
-        ("🌍", "Enrich", "IP geolocation · ISP · category"),
-        ("📊", "Export", "TXT · JSON · clipboard"),
-    ]
-    for col, (icon, title, desc) in zip([c1, c2, c3, c4, c5], steps):
-        with col:
-            st.markdown(
-                f'<div class="step-card">'
-                f'<div class="s-icon">{icon}</div>'
-                f'<div class="s-title">{title}</div>'
-                f'<div class="s-desc">{desc}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-# ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
 
@@ -844,11 +737,11 @@ def _render_error(rs: dict) -> None:
     tb = rs.get("error_tb") or st.session_state.get("_last_error_tb")
     if not err:
         return
-    st.error(f"❌  {err}")
+    st.error(f"❌ خطا: {err}")
     if tb:
-        with st.expander("🔍  Full traceback"):
+        with st.expander("🔍 جزئیات کامل خطا"):
             st.code(tb, language="python")
-    st.info(f"📄  Full logs: `{LOG_FILE}`")
+    st.info(f"📄 لاگ کامل: `{LOG_FILE}`")
 
 # ---------------------------------------------------------------------------
 # Main
@@ -868,7 +761,6 @@ def main() -> None:
     source_url, text_input, concurrency, timeout = _render_sidebar()
     _render_header(rs)
 
-    # Handle Run button
     if st.session_state._trigger_run:
         st.session_state._trigger_run = False
         st.session_state._run_state = _init_run_state()
@@ -883,14 +775,12 @@ def main() -> None:
         st.rerun()
         st.stop()
 
-    # Polling: pipeline is running → show live progress and rerun
     if rs["stage"] not in ("idle", "done", "error"):
         _render_live_progress(rs)
         time.sleep(0.5)
         st.rerun()
-        st.stop()  # never fall through
+        st.stop()
 
-    # Done / error / idle states
     if rs["stage"] == "error":
         st.session_state._last_error = rs.get("error")
         st.session_state._last_error_tb = rs.get("error_tb")
@@ -898,7 +788,7 @@ def main() -> None:
     elif rs["stage"] == "done" and rs.get("result"):
         result: list[EnrichedResult] = rs["result"]
         _render_table(result)
-        st.caption(f"⏱  Pipeline completed in {rs.get('elapsed', 0):.1f}s · {len(result)} results")
+        st.caption(f"⏱ تست در {rs.get('elapsed', 0):.0f} ثانیه کامل شد · {len(result):,} کانفیگ")
     elif rs["stage"] == "idle":
         _render_welcome()
 
