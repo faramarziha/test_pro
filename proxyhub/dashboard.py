@@ -173,6 +173,7 @@ h1 {
 .b-dc  { background: rgba(56,189,248,.16); color: #7dd3fc; }
 .b-vpn { background: rgba(248,113,113,.16);color: #fca5a5; }
 .b-biz { background: rgba(192,132,252,.16);color: #d8b4fe; }
+.b-mob { background: rgba(251,191,36,.16); color: #fcd34d; }
 .b-unk { background: rgba(148,163,184,.16);color: #cbd5e1; }
 
 /* Table rows */
@@ -245,12 +246,15 @@ CATEGORY_BADGE = {
     "Datacenter / Hosting": "b-dc",
     "Public Proxy / VPN": "b-vpn",
     "Business / Education": "b-biz",
+    "Mobile / Cellular": "b-mob",
+    "Unknown": "b-unk",
 }
 CATEGORY_FA = {
     "Residential / ISP": "خانگی / ISP",
     "Datacenter / Hosting": "دیتاسنتر",
     "Public Proxy / VPN": "پروکسی عمومی / VPN",
     "Business / Education": "سازمانی / آموزشی",
+    "Mobile / Cellular": "موبایل / سلولی",
     "Unknown": "نامشخص",
 }
 
