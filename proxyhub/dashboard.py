@@ -290,12 +290,12 @@ def _log(rs: dict, msg: str, kind: str = "info") -> None:
 # Background pipeline
 # ---------------------------------------------------------------------------
 
-def _run_pipeline_thread(source_url, text_input, concurrency, timeout, rs) -> None:
+def _run_pipeline_thread(source_url, text_input, concurrency, timeout, min_speed, rs) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _async_pipeline(source_url, text_input, concurrency, timeout, rs)
+            _async_pipeline(source_url, text_input, concurrency, timeout, min_speed, rs)
         )
     except Exception as exc:
         logger.error(f"Pipeline crashed: {exc}", exc_info=True)
@@ -633,9 +633,15 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         flag = _country_flag(r.country_code)
         c[1].markdown(f'<div class="ph-cell">{flag} {r.country or "—"}</div>',
                       unsafe_allow_html=True)
-        ping = (f"{r.download_kbps:.0f} KB/s" if r.is_working and r.download_kbps > 0 else
-                (f"{r.latency_ms:.0f} ms" if r.is_working and r.latency_ms > 0 else "—"))
-        ping_color = "#22c55e" if r.is_working and r.latency_ms < 300 else ("#fbbf24" if r.is_working else "#7b8494")
+        if r.is_working and r.speed_verified and r.download_kbps > 0:
+            ping = f"{r.download_kbps:.0f} KB/s"
+        elif r.is_working and not r.speed_verified:
+            ping = "؟"
+        elif r.is_working and r.latency_ms > 0:
+            ping = f"{r.latency_ms:.0f} ms"
+        else:
+            ping = "—"
+        ping_color = "#22c55e" if (r.is_working and r.speed_verified) else ("#fbbf24" if r.is_working else "#7b8494")
         c[2].markdown(f'<div class="ph-cell" style="color:{ping_color};font-weight:700">{ping}</div>',
                       unsafe_allow_html=True)
         c[3].markdown(_badge(r.category), unsafe_allow_html=True)
@@ -643,6 +649,8 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
             c[3].caption(f"اطمینان: {r.ip_confidence} · {', '.join(r.ip_evidence)}")
         status = "🟢" if r.is_working else f"🔴 {r.test_error[:18]}"
         c[4].markdown(f'<div style="font-size:0.72rem">{status}</div>', unsafe_allow_html=True)
+        if r.is_working and not r.speed_verified:
+            c[4].caption("سرعت اندازه‌گیری نشد")
         if c[5].button("کپی", key=f"cpy_{page}_{i}", use_container_width=True):
             _do_copy(r.proxy_raw)
             st.session_state.last_copied = r.proxy_raw
@@ -690,8 +698,9 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
             {"protocol": r.protocol, "host": r.host, "port": r.port,
              "latency_ms": r.latency_ms, "country": r.country, "city": r.city,
              "isp": r.isp, "category": r.category, "ip_confidence": r.ip_confidence,
-             "download_kbps": r.download_kbps, "test_error": r.test_error,
-             "config": r.proxy_raw}
+             "download_kbps": r.download_kbps, "quality": r.quality,
+             "speed_verified": r.speed_verified, "exit_ip": r.exit_ip,
+             "test_error": r.test_error, "config": r.proxy_raw}
             for r in rows if r.is_working
         ], indent=2, ensure_ascii=False)
         st.download_button("📊 خروجی JSON", json_out,

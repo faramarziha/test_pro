@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 REAL_DELAY_URL = "https://www.gstatic.com/generate_204"
 # A real body is required for throughput measurement; keep it modest and cache-proof.
 SPEED_TEST_URL = "https://speed.cloudflare.com/__down?bytes=262144"
+# Plain-text IP echo used to learn the tunnel's real egress IP (not the server host).
+EXIT_IP_URL = "https://api.ipify.org"
 DEFAULT_SEMAPHORE = 50
 CONNECT_TIMEOUT = 5.0
 BATCH_SIZE = 50
@@ -40,9 +42,11 @@ class TestResult:
     latency_ms: float = 0.0
     download_kbps: float = 0.0
     resolved_ip: str = ""
+    exit_ip: str = ""
     error: str = ""
     attempts: int = 1
-    quality: str = ""
+    quality: str = ""          # "fast" | "acceptable" | "unverified"
+    speed_verified: bool = True
 
 
 @dataclass
@@ -131,25 +135,38 @@ class SingBoxTester:
                     pass
 
     async def _quality_test(self, proxy: ParsedProxy, local_port: int) -> TestResult:
-        """Require a successful proxy request and >= configured throughput."""
+        """Connectivity must pass; throughput is enforced when it can be measured.
+
+        A config is only killed when (a) it cannot connect at all on every
+        attempt, or (b) throughput was actually measured and is below the
+        configured minimum. If the speed sample itself fails for infra reasons
+        (HTTP error, reset, truncation) the config stays working with
+        quality="unverified" — a config that works must not be killed by our
+        test infrastructure.
+        """
         last_error = "unknown error"
         for attempt in range(1, MAX_TEST_ATTEMPTS + 1):
             try:
                 connector = ProxyConnector(proxy_type=ProxyType.SOCKS5, host="127.0.0.1", port=local_port)
                 timeout = aiohttp.ClientTimeout(total=self._connect_timeout)
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    # 1. Connectivity — any 2xx/3xx proves the tunnel works.
                     start = time.monotonic()
                     async with session.get(REAL_DELAY_URL, headers={"Cache-Control": "no-cache"}) as response:
                         await response.read()
-                        if response.status not in (200, 204):
+                        if response.status < 200 or response.status >= 400:
                             raise RuntimeError(f"HTTP {response.status} on connectivity check")
                     latency_ms = (time.monotonic() - start) * 1000
 
+                    # 2. Real egress IP through the tunnel (accurate geolocation).
+                    exit_ip = await self._get_exit_ip(session)
+
+                    # 3. Throughput sample.
                     speed_start = time.monotonic()
                     received = 0
                     async with session.get(SPEED_TEST_URL, headers={"Cache-Control": "no-cache"}) as response:
                         if response.status != 200:
-                            raise RuntimeError(f"HTTP {response.status} on speed check")
+                            raise SpeedSampleError(f"HTTP {response.status} on speed check")
                         async for chunk in response.content.iter_chunked(16384):
                             received += len(chunk)
                             if received >= SPEED_SAMPLE_BYTES:
@@ -157,21 +174,43 @@ class SingBoxTester:
                     duration = max(time.monotonic() - speed_start, 0.001)
                     download_kbps = received / duration / 1024
                     resolved_ip = await self._resolve_host(proxy.host)
+
                     if received < SPEED_SAMPLE_BYTES:
-                        last_error = f"speed sample incomplete ({received}/{SPEED_SAMPLE_BYTES} bytes)"
-                    elif download_kbps < self._min_download_kbps:
-                        last_error = f"speed below minimum ({download_kbps:.1f} KB/s < {self._min_download_kbps:.0f} KB/s)"
-                    else:
-                        quality = "fast" if download_kbps >= 500 else "acceptable"
+                        # Server truncated the body — cannot judge speed fairly.
                         return TestResult(proxy, True, round(latency_ms, 1), round(download_kbps, 1),
-                                          resolved_ip, attempts=attempt, quality=quality)
+                                          resolved_ip, exit_ip, quality="unverified",
+                                          speed_verified=False, attempts=attempt)
+                    if download_kbps < self._min_download_kbps:
+                        return TestResult(proxy, False, round(latency_ms, 1), round(download_kbps, 1),
+                                          resolved_ip, exit_ip,
+                                          error=(f"speed below minimum ({download_kbps:.1f} KB/s "
+                                                 f"< {self._min_download_kbps:.0f} KB/s)"),
+                                          attempts=attempt)
+                    quality = "fast" if download_kbps >= 500 else "acceptable"
+                    return TestResult(proxy, True, round(latency_ms, 1), round(download_kbps, 1),
+                                      resolved_ip, exit_ip, quality=quality, attempts=attempt)
             except asyncio.TimeoutError:
                 last_error = "timeout"
+            except SpeedSampleError as exc:
+                # Speed endpoint misbehaved — the tunnel works, keep the config.
+                return TestResult(proxy, True, error="", quality="unverified",
+                                  speed_verified=False, attempts=attempt)
             except Exception as exc:
                 last_error = str(exc)[:100]
             if attempt < MAX_TEST_ATTEMPTS:
                 await asyncio.sleep(0.15)
         return TestResult(proxy, False, error=last_error, attempts=MAX_TEST_ATTEMPTS)
+
+    async def _get_exit_ip(self, session: aiohttp.ClientSession) -> str:
+        """Ask an echo endpoint through the tunnel for the real egress IP."""
+        try:
+            async with session.get(EXIT_IP_URL, headers={"Cache-Control": "no-cache"}) as response:
+                if response.status != 200:
+                    return ""
+                text = (await response.text()).strip()
+            return text if ":" in text or "." in text else ""
+        except Exception:
+            return ""
 
     async def _resolve_host(self, host: str) -> str:
         try:
@@ -225,7 +264,10 @@ class SingBoxTester:
         if p.protocol == "trojan":
             return {**base, "type": "trojan", "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
         if p.protocol == "vless":
-            tls = {"enabled": True, "server_name": p.sni or p.host}
+            tls_enabled = p.security in ("tls", "reality", "auto")
+            tls = {"enabled": tls_enabled}
+            if tls_enabled:
+                tls["server_name"] = p.sni or p.host
             if p.security == "reality":
                 tls["utls"] = {"enabled": True, "fingerprint": p.fingerprint or "chrome"}
                 tls["reality"] = {"enabled": True, "public_key": p.public_key, "short_id": p.short_id or ""}
@@ -236,14 +278,23 @@ class SingBoxTester:
             if transport: obj["transport"] = transport
             return obj
         if p.protocol == "vmess":
-            obj = {**base, "type": "vmess", "uuid": p.uuid, "security": "auto", "alter_id": int(p.extra.get("aid", 0) or 0), "tls": {"enabled": p.security in ("tls", "auto"), "server_name": p.sni or p.host}}
+            tls_enabled = p.security in ("tls", "auto")
+            obj = {**base, "type": "vmess", "uuid": p.uuid, "security": "auto",
+                   "alter_id": int(p.extra.get("aid", 0) or 0),
+                   "tls": {"enabled": tls_enabled, "server_name": p.sni or p.host}}
             transport = self._make_transport(p)
             if transport: obj["transport"] = transport
             return obj
         if p.protocol in ("hysteria2", "hysteria"):
-            return {**base, "type": "hysteria2", "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+            out = {**base, "type": "hysteria2", "password": p.password,
+                   "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+            obfs = (p.extra.get("obfs") or "").strip()
+            if obfs:
+                out["obfs"] = {"type": "salamander", "password": obfs}
+            return out
         if p.protocol == "tuic":
-            return {**base, "type": "tuic", "uuid": p.uuid, "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+            return {**base, "type": "tuic", "uuid": p.uuid, "password": p.password,
+                    "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
         raise ValueError(f"Unsupported protocol: {p.protocol}")
 
     @staticmethod
@@ -261,7 +312,15 @@ class SingBoxTester:
             if proxy.path: result["path"] = proxy.path
             if proxy.host_header: result["host"] = [proxy.host_header]
             return result
-        return None
+        if transport in ("xhttp", "splithttp"):
+            result = {"type": transport, "path": proxy.path or "/"}
+            host = proxy.host_header or proxy.sni or proxy.host
+            if host: result["host"] = [host]
+            return result
+        # Unknown transport — do not silently fall back to raw TCP (that breaks
+        # working configs); let sing-box surface the config error instead.
+        logger.debug("Unknown transport %r for %s", transport, proxy.host)
+        return {"type": transport, "path": proxy.path or "/"}
 
     @property
     def has_singbox(self) -> bool:
@@ -285,3 +344,7 @@ class SingBoxTester:
             if os.name != "nt": os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             else: process.kill()
         except Exception: pass
+
+
+class SpeedSampleError(RuntimeError):
+    """Raised when the speed endpoint itself misbehaves (not the proxy)."""

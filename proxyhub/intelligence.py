@@ -122,11 +122,11 @@ EDU_KEYWORDS: frozenset[str] = frozenset({
     "cern", "nasa", "dfn", "janet", "internet2", "rediris", "garr",
 })
 
-# Business / enterprise keywords
+# Business / enterprise keywords. Corporate suffixes (Inc/LLC/Ltd/GmbH…) are
+# intentionally excluded — they appear in consumer ISP names too and would
+# drown out residential signals.
 BIZ_KEYWORDS: frozenset[str] = frozenset({
-    "corp", "corporate", "corporation", "enterprise", "inc", "llc",
-    "ltd", "limited", "gmbh", "plc", "s.a.", "b.v.", "oy", "ab ",
-    "holdings", "group", "industries", "solutions", "systems",
+    "enterprise", "holdings", "group", "industries", "solutions", "systems",
     "technologies", "technology", "consulting", "services", "bank",
     "insurance", "hospital", "clinic", "government", "ministry",
     "authority", "administration", "municipal", "city of",
@@ -136,12 +136,30 @@ BIZ_KEYWORDS: frozenset[str] = frozenset({
 PTR_RESIDENTIAL_HINTS: tuple[str, ...] = (
     "res", "dyn", "dynamic", "pool", "dsl", "pppoe", "ppp", "cable",
     "home", "customer", "client", "user", "dial", "adsl", "vdsl",
-    "fttx", "ftth", "wifi", "mobile", "gprs", "lte", "umts",
+    "fttx", "ftth", "wifi", "mobile", "gprs", "lte", "umts", "hsd",
+    "sub", "broadband", "cust", "cpe", "modem", "docsis",
 )
 PTR_HOSTING_HINTS: tuple[str, ...] = (
     "static", "vps", "cloud", "dedicated", "server", "host", "colo",
     "datacenter", "data-center", "dc ", "vds", "root", "node",
 )
+
+# Generic consumer-ISP wording found in org/ASN/company names. Catches
+# residential ISPs that are not in the explicit CONSUMER_ISPS list.
+ISP_HINTS: frozenset[str] = frozenset({
+    "broadband", "internet service", "internet services", "internet provider",
+    "internet access", "internet", "dsl", "adsl", "vdsl", "xdsl", "ftth",
+    "fttx", "fiber", "fibre", "cable modem", "cable tv", "docsis", "hfc",
+    "residential", "pppoe", "dial-up", "dialup", "wimax", "fixed wireless",
+    "wireless broadband", "home internet", "telecom", "telecommunication",
+    "telecommunications", "subscriber", "cable company", "isp",
+})
+
+# Words that contradict a consumer-ISP reading of the same text.
+HOSTING_WORDS: frozenset[str] = frozenset({
+    "cloud", "hosting", "host", "datacenter", "data center", "vps", "colo",
+    "dedicated", "server", "cdn", "colo", "networks", "network solutions",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +183,18 @@ class IPInfo:
     category: str = "Unknown"
     confidence: str = "low"
     evidence: tuple[str, ...] = ()
+    # Secondary source (ipapi.is) signals — WHOIS/BGP-based, more reliable
+    # than ip-api keyword flags. None = not queried.
+    alt_hosting: Optional[bool] = None
+    alt_proxy: Optional[bool] = None
+    alt_vpn: Optional[bool] = None
+    alt_company: str = ""
 
     @property
     def text_blob(self) -> str:
         """All classification-relevant text, lowercased."""
         return " ".join([
-            self.isp, self.org, self.asn, self.asname,
+            self.isp, self.org, self.asn, self.asname, self.alt_company,
         ]).lower()
 
 
@@ -192,6 +216,9 @@ class EnrichedResult:
     download_kbps: float = 0.0
     test_error: str = ""
     test_attempts: int = 1
+    quality: str = ""
+    speed_verified: bool = True
+    exit_ip: str = ""
     ip_confidence: str = "low"
     ip_evidence: tuple[str, ...] = ()
 
@@ -202,38 +229,55 @@ class EnrichedResult:
 
 def classify_ip(info: IPInfo) -> tuple[str, str, tuple[str, ...]]:
     """
-    Evidence-based classification. Never guesses 'Residential' without
-    positive evidence — unmatched IPs are 'Unknown'.
+    Evidence-based classification with a reliable secondary source.
+
+    ipapi.is (WHOIS/BGP-based) overrides ip-api's keyword-guessed flags and
+    fills the gaps, so residential exits are not mislabeled as datacenter or
+    proxy, and unknown ISPs are not just dropped as 'Unknown'.
     """
-    # 1-3. Explicit flags from the API (highest confidence)
-    if info.proxy:
-        return "Public Proxy / VPN", "high", ("provider proxy flag",)
-    if info.hosting:
-        return "Datacenter / Hosting", "high", ("provider hosting flag",)
+    # 0. Secondary source (ipapi.is) — most trustworthy, decides conflicts.
+    if info.alt_proxy or info.alt_vpn:
+        return "Public Proxy / VPN", "high", ("ipapi.is proxy/VPN flag",)
+    if info.alt_hosting:
+        return "Datacenter / Hosting", "high", ("ipapi.is datacenter flag",)
+
+    # 1. Primary flags — kept only when the secondary source did not
+    #    explicitly rule them out (ip-api flags have false positives).
+    if info.proxy and not (info.alt_proxy is False and info.alt_vpn is False):
+        return "Public Proxy / VPN", "high", ("ip-api proxy flag",)
+    if info.hosting and info.alt_hosting is not False:
+        return "Datacenter / Hosting", "high", ("ip-api hosting flag",)
     if info.mobile:
         return "Mobile / Cellular", "high", ("provider mobile flag",)
 
     text = info.text_blob
     ptr = (info.reverse or "").lower()
+    combined = f"{text} {ptr}"
 
-    # 4. ASN / ISP / org keyword matching
+    # 2. ASN / ISP / org keyword matching
     if any(kw in text for kw in CLOUD_ORGS):
         return "Datacenter / Hosting", "high", ("cloud/hosting ASN or provider",)
 
     if any(kw in text for kw in EDU_KEYWORDS):
         return "Business / Education", "medium", ("education/research provider",)
 
-    if any(kw in text for kw in CONSUMER_ISPS):
+    if any(kw in combined for kw in CONSUMER_ISPS):
         # Consumer ISP, but double-check PTR for hosting hints
         if any(h in ptr for h in PTR_HOSTING_HINTS) and not any(
                 h in ptr for h in PTR_RESIDENTIAL_HINTS):
             return "Datacenter / Hosting", "medium", ("consumer ISP with hosting-like PTR",)
         return "Residential / ISP", "medium", ("consumer ISP/ASN match",)
 
+    # 3. Generic consumer-ISP wording (broadband/dsl/fiber/telecom…) — catches
+    #    residential ISPs that are not in the explicit name list. Runs before
+    #    business keywords so corporate suffixes do not overpower it.
+    if any(kw in combined for kw in ISP_HINTS) and not any(h in combined for h in HOSTING_WORDS):
+        return "Residential / ISP", "low", ("consumer ISP wording in org/ASN",)
+
     if any(kw in text for kw in BIZ_KEYWORDS):
         return "Business / Education", "medium", ("business provider match",)
 
-    # 5. PTR-only heuristics (ISP name unmatched but PTR tells a story)
+    # 4. PTR-only heuristics (ISP name unmatched but PTR tells a story)
     if ptr:
         if any(h in ptr for h in PTR_RESIDENTIAL_HINTS):
             return "Residential / ISP", "low", ("residential PTR pattern",)
@@ -259,6 +303,9 @@ class IPIntelligenceEngine:
 
     PRIMARY_URL = "http://ip-api.com/batch"
     FALLBACK_URL = "https://freeipapi.com/api/json"
+    # WHOIS/BGP-based secondary opinion (anonymous tier: 100 req/day).
+    ALT_API_URL = "https://api.ipapi.is"
+    ALT_DAILY_CAP = 80
 
     def __init__(self, batch_size: int = BATCH_SIZE):
         self._batch_size = batch_size
@@ -272,27 +319,70 @@ class IPIntelligenceEngine:
         async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             self._session = session
 
+            # Primary: ip-api.com batch (country/ISP/flags)
             for i in range(0, len(unique), self._batch_size):
                 batch = unique[i:i + self._batch_size]
                 batch_results = await self._query_primary(batch)
                 results.update(batch_results)
-
                 if i + self._batch_size < len(unique):
                     await asyncio.sleep(BATCH_DELAY)
 
-        # Fallback for any misses (single-IP, capped to avoid rate abuse)
-        missing = [ip for ip in unique if ip not in results][:50]
-        for ip in missing:
-            info = await self._query_fallback_single(ip)
-            if info:
-                results[ip] = info
-            await asyncio.sleep(0.15)
+            # Fallback for any misses (single-IP, capped to avoid rate abuse)
+            missing = [ip for ip in unique if ip not in results][:50]
+            for ip in missing:
+                info = await self._query_fallback_single(ip)
+                if info:
+                    info.category = categorize_ip(info)
+                    results[ip] = info
+                await asyncio.sleep(0.15)
+
+            # Secondary opinion (ipapi.is) for the IPs where it matters most:
+            # unknown category, or ip-api flagged proxy/hosting (veto check).
+            candidates = [
+                ip for ip in unique
+                if (info := results.get(ip)) is not None
+                and (info.category == "Unknown" or info.proxy or info.hosting)
+            ]
+            if candidates:
+                alt_map = await self._query_alt(candidates)
+                for ip, alt in alt_map.items():
+                    info = results.get(ip)
+                    if info is None:
+                        continue
+                    info.alt_hosting = bool(alt.get("is_datacenter"))
+                    info.alt_proxy = bool(alt.get("is_proxy"))
+                    info.alt_vpn = bool(alt.get("is_vpn"))
+                    info.alt_company = (
+                        alt.get("company_name") or alt.get("asn_org") or ""
+                    )
+                    info.category = categorize_ip(info)
+
+        self._session = None
 
         for ip in unique:
             if ip not in results:
                 results[ip] = IPInfo(ip=ip, category="Unknown")
 
         return results
+
+    async def _query_alt(self, ips: list[str]) -> dict[str, dict]:
+        """Best-effort ipapi.is lookups (anonymous tier, capped per day)."""
+        out: dict[str, dict] = {}
+        for ip in ips[:self.ALT_DAILY_CAP]:
+            try:
+                async with self._session.get(  # type: ignore[union-attr]
+                    f"{self.ALT_API_URL}/?q={ip}"
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    d = await resp.json()
+                    if not isinstance(d, dict) or "error" in d:
+                        continue
+                    out[ip] = d
+            except Exception as exc:
+                logger.debug("ipapi.is failed for %s: %s", ip, exc)
+            await asyncio.sleep(0.05)
+        return out
 
     async def _query_primary(self, ips: list[str]) -> dict[str, IPInfo]:
         """Query ip-api.com/batch. Retries on 429 with backoff."""
@@ -335,8 +425,12 @@ class IPIntelligenceEngine:
                     city=d.get("city", ""),
                     isp=d.get("isp", "") or (d.get("connection") or {}).get("isp", ""),
                     asn=str((d.get("connection") or {}).get("asn", "") or ""),
+                    org=d.get("org", "") or (d.get("connection") or {}).get("org", ""),
+                    asname=d.get("asname", "") or "",
+                    reverse=d.get("reverse", "") or "",
                     hosting=bool(d.get("hosting", False)),
                     proxy=bool(d.get("proxy", False)),
+                    mobile=bool(d.get("mobile", False)),
                 )
         except Exception as exc:
             logger.debug("freeipapi fallback failed for %s: %s", ip, exc)
@@ -393,7 +487,9 @@ async def enrich_test_results(
     for tr in test_results:
         if not tr.working:
             continue
-        ip = tr.resolved_ip or (tr.proxy.host if _is_ip(tr.proxy.host) else "")
+        # Prefer the real egress IP seen through the tunnel (accurate), then
+        # the resolved server host, then a literal IP host.
+        ip = tr.exit_ip or tr.resolved_ip or (tr.proxy.host if _is_ip(tr.proxy.host) else "")
         if ip:
             ips_for_lookup.append(ip)
 
@@ -404,7 +500,7 @@ async def enrich_test_results(
     enriched: list[EnrichedResult] = []
     for tr in test_results:
         p = tr.proxy
-        ip = tr.resolved_ip or (p.host if _is_ip(p.host) else "")
+        ip = tr.exit_ip or tr.resolved_ip or (p.host if _is_ip(p.host) else "")
         info = ip_map.get(ip) if ip else None
         if info is None:
             info = IPInfo(ip=ip or p.host)
@@ -426,6 +522,9 @@ async def enrich_test_results(
             download_kbps=getattr(tr, "download_kbps", 0.0),
             test_error=getattr(tr, "error", ""),
             test_attempts=getattr(tr, "attempts", 1),
+            quality=getattr(tr, "quality", ""),
+            speed_verified=getattr(tr, "speed_verified", True),
+            exit_ip=getattr(tr, "exit_ip", ""),
             ip_confidence=info.confidence,
             ip_evidence=info.evidence,
         ))
