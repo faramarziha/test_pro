@@ -163,6 +163,8 @@ class IPInfo:
     proxy: bool = False
     mobile: bool = False
     category: str = "Unknown"
+    confidence: str = "low"
+    evidence: tuple[str, ...] = ()
 
     @property
     def text_blob(self) -> str:
@@ -187,54 +189,65 @@ class EnrichedResult:
     category: str
     asn: str
     is_working: bool
+    download_kbps: float = 0.0
+    test_error: str = ""
+    test_attempts: int = 1
+    ip_confidence: str = "low"
+    ip_evidence: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
 # STRICT categorization
 # ---------------------------------------------------------------------------
 
-def categorize_ip(info: IPInfo) -> str:
+def classify_ip(info: IPInfo) -> tuple[str, str, tuple[str, ...]]:
     """
     Evidence-based classification. Never guesses 'Residential' without
     positive evidence — unmatched IPs are 'Unknown'.
     """
     # 1-3. Explicit flags from the API (highest confidence)
     if info.proxy:
-        return "Public Proxy / VPN"
+        return "Public Proxy / VPN", "high", ("provider proxy flag",)
     if info.hosting:
-        return "Datacenter / Hosting"
+        return "Datacenter / Hosting", "high", ("provider hosting flag",)
     if info.mobile:
-        return "Mobile / Cellular"
+        return "Mobile / Cellular", "high", ("provider mobile flag",)
 
     text = info.text_blob
     ptr = (info.reverse or "").lower()
 
     # 4. ASN / ISP / org keyword matching
     if any(kw in text for kw in CLOUD_ORGS):
-        return "Datacenter / Hosting"
+        return "Datacenter / Hosting", "high", ("cloud/hosting ASN or provider",)
 
     if any(kw in text for kw in EDU_KEYWORDS):
-        return "Business / Education"
+        return "Business / Education", "medium", ("education/research provider",)
 
     if any(kw in text for kw in CONSUMER_ISPS):
         # Consumer ISP, but double-check PTR for hosting hints
         if any(h in ptr for h in PTR_HOSTING_HINTS) and not any(
                 h in ptr for h in PTR_RESIDENTIAL_HINTS):
-            return "Datacenter / Hosting"
-        return "Residential / ISP"
+            return "Datacenter / Hosting", "medium", ("consumer ISP with hosting-like PTR",)
+        return "Residential / ISP", "medium", ("consumer ISP/ASN match",)
 
     if any(kw in text for kw in BIZ_KEYWORDS):
-        return "Business / Education"
+        return "Business / Education", "medium", ("business provider match",)
 
     # 5. PTR-only heuristics (ISP name unmatched but PTR tells a story)
     if ptr:
         if any(h in ptr for h in PTR_RESIDENTIAL_HINTS):
-            return "Residential / ISP"
+            return "Residential / ISP", "low", ("residential PTR pattern",)
         if any(h in ptr for h in PTR_HOSTING_HINTS):
-            return "Datacenter / Hosting"
+            return "Datacenter / Hosting", "low", ("hosting PTR pattern",)
 
-    # 6. Strict fallback — no positive evidence
-    return "Unknown"
+    return "Unknown", "low", ()
+
+
+def categorize_ip(info: IPInfo) -> str:
+    """Compatibility wrapper returning only the category."""
+    category, confidence, evidence = classify_ip(info)
+    info.confidence, info.evidence = confidence, evidence
+    return category
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +423,11 @@ async def enrich_test_results(
             category=info.category,
             asn=info.asn,
             is_working=tr.working,
+            download_kbps=getattr(tr, "download_kbps", 0.0),
+            test_error=getattr(tr, "error", ""),
+            test_attempts=getattr(tr, "attempts", 1),
+            ip_confidence=info.confidence,
+            ip_evidence=info.evidence,
         ))
 
     return enriched

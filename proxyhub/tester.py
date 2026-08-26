@@ -1,27 +1,16 @@
-"""
-SingBoxTester: v2rayNG-style REAL DELAY testing engine.
-
-Real delay = HTTP GET https://www.gstatic.com/generate_204 THROUGH the proxy,
-measuring full round-trip. 204 response = working, timeout = dead.
-
-Efficiency strategy (unlike one-subprocess-per-proxy):
-  ONE sing-box process per batch, with N mixed inbounds → N outbounds,
-  routed 1:1 via route rules. All inbounds tested concurrently.
-"""
+"""Proxy connectivity and throughput testing through sing-box."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 import socket
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -32,13 +21,16 @@ from proxyhub.installer import find_singbox_sync, SingBoxInstaller
 
 logger = logging.getLogger(__name__)
 
-# v2rayNG uses https://www.gstatic.com/generate_204 for real delay
 REAL_DELAY_URL = "https://www.gstatic.com/generate_204"
-
+# A real body is required for throughput measurement; keep it modest and cache-proof.
+SPEED_TEST_URL = "https://speed.cloudflare.com/__down?bytes=262144"
 DEFAULT_SEMAPHORE = 50
 CONNECT_TIMEOUT = 5.0
-BATCH_SIZE = 50          # proxies per sing-box instance
-STARTUP_TIMEOUT = 5.0    # max wait for sing-box inbounds to listen
+BATCH_SIZE = 50
+STARTUP_TIMEOUT = 5.0
+MIN_DOWNLOAD_KBPS = 100.0
+SPEED_SAMPLE_BYTES = 262144
+MAX_TEST_ATTEMPTS = 2
 
 
 @dataclass
@@ -46,8 +38,11 @@ class TestResult:
     proxy: ParsedProxy
     working: bool
     latency_ms: float = 0.0
+    download_kbps: float = 0.0
     resolved_ip: str = ""
     error: str = ""
+    attempts: int = 1
+    quality: str = ""
 
 
 @dataclass
@@ -60,137 +55,73 @@ class BatchTestResult:
 
 
 class SingBoxTester:
-    """Real-delay proxy tester using batched sing-box instances."""
+    """Run a connectivity check followed by a minimum-throughput check."""
 
-    def __init__(
-        self,
-        concurrency: int = DEFAULT_SEMAPHORE,
-        connect_timeout: float = CONNECT_TIMEOUT,
-        singbox_path: Optional[str] = None,
-        installer: Optional[SingBoxInstaller] = None,
-        batch_size: int = BATCH_SIZE,
-    ):
+    def __init__(self, concurrency: int = DEFAULT_SEMAPHORE,
+                 connect_timeout: float = CONNECT_TIMEOUT,
+                 singbox_path: Optional[str] = None,
+                 installer: Optional[SingBoxInstaller] = None,
+                 batch_size: int = BATCH_SIZE,
+                 min_download_kbps: float = MIN_DOWNLOAD_KBPS):
         self._concurrency = concurrency
         self._connect_timeout = connect_timeout
         self._installer = installer or SingBoxInstaller()
         self._singbox_path = singbox_path or find_singbox_sync()
         self._install_lock = asyncio.Lock()
         self._batch_size = batch_size
+        self._min_download_kbps = min_download_kbps
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    async def test_all(
-        self,
-        proxies: list[ParsedProxy],
-        progress_callback=None,
-    ) -> BatchTestResult:
-        """REAL DELAY test for all proxies (v2rayNG-style), batched."""
+    async def test_all(self, proxies: list[ParsedProxy], progress_callback=None) -> BatchTestResult:
         start = time.monotonic()
-
-        # Ensure sing-box is available (single download if needed)
         if not self._singbox_path:
             async with self._install_lock:
                 if not self._singbox_path:
                     self._singbox_path = await self._installer.ensure_installed()
-
         if not self._singbox_path:
-            logger.warning("sing-box unavailable — cannot run real delay test")
-            return BatchTestResult(
-                results=[TestResult(proxy=p, working=False,
-                                    error="sing-box not available") for p in proxies],
-                total=len(proxies),
-                working=0,
-                dead=len(proxies),
-                elapsed_seconds=round(time.monotonic() - start, 2),
-            )
+            results = [TestResult(p, False, error="sing-box not available") for p in proxies]
+            return BatchTestResult(results, len(results), 0, len(results), round(time.monotonic() - start, 2))
 
         results: list[TestResult] = []
         total = len(proxies)
-        done = 0
-
         for batch in self._chunk(proxies, self._batch_size):
             batch_results = await self._test_batch(batch)
             results.extend(batch_results)
-            done += len(batch)
             if progress_callback:
-                for r in batch_results:
-                    progress_callback(done, total, r)
+                for index, result in enumerate(batch_results, 1):
+                    progress_callback(min(len(results) - len(batch_results) + index, total), total, result)
 
-        elapsed = time.monotonic() - start
-        working = sum(1 for r in results if r.working)
-
-        return BatchTestResult(
-            results=results,
-            total=len(results),
-            working=working,
-            dead=len(results) - working,
-            elapsed_seconds=round(elapsed, 2),
-        )
-
-    # ------------------------------------------------------------------
-    # Batch: one sing-box process, N inbounds → N outbounds
-    # ------------------------------------------------------------------
+        working = sum(result.working for result in results)
+        return BatchTestResult(results, len(results), working, len(results) - working,
+                               round(time.monotonic() - start, 2))
 
     async def _test_batch(self, batch: list[ParsedProxy]) -> list[TestResult]:
-        """Test a batch through a single sing-box instance."""
-        # Allocate a local port per proxy
         ports = [self._find_free_port() for _ in batch]
-
-        config = self._build_batch_config(batch, ports)
         config_path: Optional[str] = None
         process: Optional[subprocess.Popen] = None
-
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", delete=False, encoding="utf-8"
-            ) as f:
-                json.dump(config, f, ensure_ascii=False)
-                config_path = f.name
-
-            process = subprocess.Popen(
-                [self._singbox_path, "run", "-c", config_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=os.setsid if os.name != "nt" else None,
-            )
-
-            # Wait until all inbounds are listening (or timeout)
-            ready = await self._wait_ports_ready(ports, timeout=STARTUP_TIMEOUT)
-
-            # Test all ports concurrently
+            config = self._build_batch_config(batch, ports)
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as file:
+                json.dump(config, file, ensure_ascii=False)
+                config_path = file.name
+            process = subprocess.Popen([self._singbox_path, "run", "-c", config_path],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       preexec_fn=os.setsid if os.name != "nt" else None)
+            ready = await self._wait_ports_ready(ports, STARTUP_TIMEOUT)
             sem = asyncio.Semaphore(max(self._concurrency, 1))
 
-            batch_results: dict[int, TestResult] = {}
-
-            async def _run(idx: int, proxy: ParsedProxy):
+            async def run_one(index: int, proxy: ParsedProxy):
                 async with sem:
-                    return idx, await self._real_delay_test(proxy, ports[idx])
+                    return index, await self._quality_test(proxy, ports[index])
 
-            pending = [
-                _run(i, p) for i, p in enumerate(batch) if ready[i]
-            ]
-            if pending:
-                for coro in asyncio.as_completed(pending):
-                    idx, result = await coro
-                    batch_results[idx] = result
-
-            # Ports that never opened = config error
-            for i, (port, proxy) in enumerate(zip(ports, batch)):
-                if not ready[i]:
-                    batch_results[i] = TestResult(
-                        proxy=proxy, working=False,
-                        error="sing-box inbound failed to start")
-
-            return [batch_results.get(i, TestResult(proxy=p, working=False,
-                                                    error="untested"))
-                    for i, p in enumerate(batch)]
-
+            pairs = await asyncio.gather(*(run_one(i, proxy) for i, proxy in enumerate(batch)))
+            results = {index: result for index, result in pairs}
+            for index, proxy in enumerate(batch):
+                if not ready[index]:
+                    results[index] = TestResult(proxy, False, error="sing-box inbound failed to start")
+            return [results[i] for i in range(len(batch))]
         except Exception as exc:
-            logger.error("Batch test failed: %s", exc)
-            return [TestResult(proxy=p, working=False, error=str(exc)[:100])
-                    for p in batch]
+            logger.exception("Batch test failed")
+            return [TestResult(proxy, False, error=str(exc)[:100]) for proxy in batch]
         finally:
             self._kill_process(process)
             if config_path:
@@ -199,68 +130,83 @@ class SingBoxTester:
                 except OSError:
                     pass
 
-    def _build_batch_config(
-        self, batch: list[ParsedProxy], ports: list[int]
-    ) -> dict:
-        """One sing-box config: N mixed inbounds, N outbounds, 1:1 routing."""
-        inbounds = []
-        outbounds = []
-        rules = []
+    async def _quality_test(self, proxy: ParsedProxy, local_port: int) -> TestResult:
+        """Require a successful proxy request and >= configured throughput."""
+        last_error = "unknown error"
+        for attempt in range(1, MAX_TEST_ATTEMPTS + 1):
+            try:
+                connector = ProxyConnector(proxy_type=ProxyType.SOCKS5, host="127.0.0.1", port=local_port)
+                timeout = aiohttp.ClientTimeout(total=self._connect_timeout)
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    start = time.monotonic()
+                    async with session.get(REAL_DELAY_URL, headers={"Cache-Control": "no-cache"}) as response:
+                        await response.read()
+                        if response.status not in (200, 204):
+                            raise RuntimeError(f"HTTP {response.status} on connectivity check")
+                    latency_ms = (time.monotonic() - start) * 1000
 
-        for i, (proxy, port) in enumerate(zip(batch, ports)):
-            in_tag = f"in-{i}"
-            out_tag = f"out-{i}"
-            inbounds.append({
-                "type": "mixed",
-                "tag": in_tag,
-                "listen": "127.0.0.1",
-                "listen_port": port,
-            })
+                    speed_start = time.monotonic()
+                    received = 0
+                    async with session.get(SPEED_TEST_URL, headers={"Cache-Control": "no-cache"}) as response:
+                        if response.status != 200:
+                            raise RuntimeError(f"HTTP {response.status} on speed check")
+                        async for chunk in response.content.iter_chunked(16384):
+                            received += len(chunk)
+                            if received >= SPEED_SAMPLE_BYTES:
+                                break
+                    duration = max(time.monotonic() - speed_start, 0.001)
+                    download_kbps = received / duration / 1024
+                    resolved_ip = await self._resolve_host(proxy.host)
+                    if received < SPEED_SAMPLE_BYTES:
+                        last_error = f"speed sample incomplete ({received}/{SPEED_SAMPLE_BYTES} bytes)"
+                    elif download_kbps < self._min_download_kbps:
+                        last_error = f"speed below minimum ({download_kbps:.1f} KB/s < {self._min_download_kbps:.0f} KB/s)"
+                    else:
+                        quality = "fast" if download_kbps >= 500 else "acceptable"
+                        return TestResult(proxy, True, round(latency_ms, 1), round(download_kbps, 1),
+                                          resolved_ip, attempts=attempt, quality=quality)
+            except asyncio.TimeoutError:
+                last_error = "timeout"
+            except Exception as exc:
+                last_error = str(exc)[:100]
+            if attempt < MAX_TEST_ATTEMPTS:
+                await asyncio.sleep(0.15)
+        return TestResult(proxy, False, error=last_error, attempts=MAX_TEST_ATTEMPTS)
+
+    async def _resolve_host(self, host: str) -> str:
+        try:
+            loop = asyncio.get_running_loop()
+            addresses = await asyncio.wait_for(loop.getaddrinfo(host, None), timeout=3.0)
+            return addresses[0][4][0] if addresses else ""
+        except Exception:
+            return ""
+
+    def _build_batch_config(self, batch: list[ParsedProxy], ports: list[int]) -> dict:
+        inbounds, outbounds, rules = [], [], []
+        for index, (proxy, port) in enumerate(zip(batch, ports)):
+            inbound_tag, outbound_tag = f"in-{index}", f"out-{index}"
+            inbounds.append({"type": "mixed", "tag": inbound_tag, "listen": "127.0.0.1", "listen_port": port})
             try:
                 outbound = self._make_outbound(proxy)
-                outbound["tag"] = out_tag
-                outbounds.append(outbound)
+                outbound["tag"] = outbound_tag
             except Exception:
-                # Invalid config — route to a dead-end direct outbound
-                outbounds.append({
-                    "type": "direct", "tag": out_tag,
-                })
-            rules.append({"inbound": [in_tag], "outbound": out_tag})
-
-        # Fallback outbound so unmatched traffic never crosses streams
+                outbound = {"type": "block", "tag": outbound_tag}
+            outbounds.append(outbound)
+            rules.append({"inbound": [inbound_tag], "outbound": outbound_tag})
         outbounds.append({"type": "direct", "tag": "direct-fallback"})
+        return {"log": {"level": "error"}, "inbounds": inbounds, "outbounds": outbounds,
+                "route": {"rules": rules, "final": "direct-fallback"}}
 
-        return {
-            "log": {"level": "error"},
-            "inbounds": inbounds,
-            "outbounds": outbounds,
-            "route": {
-                "rules": rules,
-                "final": "direct-fallback",
-            },
-        }
-
-    async def _wait_ports_ready(
-        self, ports: list[int], timeout: float
-    ) -> list[bool]:
-        """Poll until each port accepts TCP connections."""
+    async def _wait_ports_ready(self, ports: list[int], timeout: float) -> list[bool]:
         ready = [False] * len(ports)
         deadline = time.monotonic() + timeout
-
         while time.monotonic() < deadline:
-            all_ready = True
-            for i, port in enumerate(ports):
-                if ready[i]:
-                    continue
-                if self._port_open(port):
-                    ready[i] = True
-                else:
-                    all_ready = False
-            if all_ready:
+            for index, port in enumerate(ports):
+                if not ready[index] and self._port_open(port):
+                    ready[index] = True
+            if all(ready):
                 break
             await asyncio.sleep(0.15)
-
-        # Process may have crashed — check
         return ready
 
     @staticmethod
@@ -271,164 +217,71 @@ class SingBoxTester:
         except OSError:
             return False
 
-    # ------------------------------------------------------------------
-    # The REAL DELAY test itself (v2rayNG-identical)
-    # ------------------------------------------------------------------
-
-    async def _real_delay_test(self, proxy: ParsedProxy, local_port: int) -> TestResult:
-        """HTTP GET generate_204 THROUGH the proxy; measure round-trip."""
-        connector = ProxyConnector(
-            proxy_type=ProxyType.SOCKS5,
-            host="127.0.0.1",
-            port=local_port,
-        )
-        timeout = aiohttp.ClientTimeout(total=self._connect_timeout)
-
-        try:
-            async with aiohttp.ClientSession(
-                connector=connector, timeout=timeout
-            ) as session:
-                start = time.monotonic()
-                async with session.get(REAL_DELAY_URL) as resp:
-                    await resp.read()
-                    latency_ms = (time.monotonic() - start) * 1000
-
-                    if resp.status in (200, 204):
-                        # Resolve proxy host → IP for geolocation lookup
-                        resolved_ip = await self._resolve_host(proxy.host)
-                        return TestResult(
-                            proxy=proxy,
-                            working=True,
-                            latency_ms=round(latency_ms, 1),
-                            resolved_ip=resolved_ip,
-                        )
-                    return TestResult(
-                        proxy=proxy, working=False,
-                        error=f"HTTP {resp.status}",
-                    )
-        except asyncio.TimeoutError:
-            return TestResult(proxy=proxy, working=False, error="timeout")
-        except Exception as exc:
-            return TestResult(proxy=proxy, working=False,
-                              error=str(exc)[:80])
-
-    async def _resolve_host(self, host: str) -> str:
-        """DNS-resolve a hostname to an IP (OS-cached, cheap for repeats)."""
-        try:
-            loop = asyncio.get_running_loop()
-            addrs = await asyncio.wait_for(
-                loop.getaddrinfo(host, None), timeout=3.0
-            )
-            return addrs[0][4][0] if addrs else ""
-        except Exception:
-            return ""
-
-    # ------------------------------------------------------------------
-    # Outbound builder (same as before, per-protocol)
-    # ------------------------------------------------------------------
-
     def _make_outbound(self, proxy: ParsedProxy) -> dict:
         p = proxy
-        base: dict = {"server": p.host, "server_port": p.port or 443}
-
+        base = {"server": p.host, "server_port": p.port or 443}
         if p.protocol == "shadowsocks":
-            return {**base, "type": "shadowsocks",
-                    "method": p.extra.get("method", "aes-256-gcm"),
-                    "password": p.password}
-        elif p.protocol == "trojan":
-            return {**base, "type": "trojan", "password": p.password,
-                    "tls": {"enabled": True, "server_name": p.sni or p.host,
-                            "insecure": p.allow_insecure}}
-        elif p.protocol == "vless":
-            tls: dict = {"enabled": True, "server_name": p.sni or p.host}
+            return {**base, "type": "shadowsocks", "method": p.extra.get("method", "aes-256-gcm"), "password": p.password}
+        if p.protocol == "trojan":
+            return {**base, "type": "trojan", "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+        if p.protocol == "vless":
+            tls = {"enabled": True, "server_name": p.sni or p.host}
             if p.security == "reality":
-                tls["utls"] = {"enabled": True,
-                               "fingerprint": p.fingerprint or "chrome"}
-                tls["reality"] = {"enabled": True,
-                                  "public_key": p.public_key,
-                                  "short_id": p.short_id or ""}
+                tls["utls"] = {"enabled": True, "fingerprint": p.fingerprint or "chrome"}
+                tls["reality"] = {"enabled": True, "public_key": p.public_key, "short_id": p.short_id or ""}
             elif p.fingerprint:
-                tls["utls"] = {"enabled": True,
-                               "fingerprint": p.fingerprint}
+                tls["utls"] = {"enabled": True, "fingerprint": p.fingerprint}
+            obj = {**base, "type": "vless", "uuid": p.uuid, "flow": p.flow or "", "tls": tls}
             transport = self._make_transport(p)
-            obj = {**base, "type": "vless", "uuid": p.uuid,
-                   "flow": p.flow or "", "tls": tls}
-            if transport:
-                obj["transport"] = transport
+            if transport: obj["transport"] = transport
             return obj
-        elif p.protocol == "vmess":
+        if p.protocol == "vmess":
+            obj = {**base, "type": "vmess", "uuid": p.uuid, "security": "auto", "alter_id": int(p.extra.get("aid", 0) or 0), "tls": {"enabled": p.security in ("tls", "auto"), "server_name": p.sni or p.host}}
             transport = self._make_transport(p)
-            obj = {**base, "type": "vmess", "uuid": p.uuid, "security": "auto",
-                   "alter_id": int(p.extra.get("aid", 0) or 0),
-                   "tls": {"enabled": p.security in ("tls", "auto"),
-                           "server_name": p.sni or p.host}}
-            if transport:
-                obj["transport"] = transport
+            if transport: obj["transport"] = transport
             return obj
-        elif p.protocol in ("hysteria2", "hysteria"):
-            return {**base, "type": "hysteria2", "password": p.password,
-                    "tls": {"enabled": True, "server_name": p.sni or p.host,
-                            "insecure": p.allow_insecure}}
-        elif p.protocol == "tuic":
-            return {**base, "type": "tuic", "uuid": p.uuid,
-                    "password": p.password,
-                    "tls": {"enabled": True, "server_name": p.sni or p.host,
-                            "insecure": p.allow_insecure}}
+        if p.protocol in ("hysteria2", "hysteria"):
+            return {**base, "type": "hysteria2", "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
+        if p.protocol == "tuic":
+            return {**base, "type": "tuic", "uuid": p.uuid, "password": p.password, "tls": {"enabled": True, "server_name": p.sni or p.host, "insecure": p.allow_insecure}}
         raise ValueError(f"Unsupported protocol: {p.protocol}")
 
-    def _make_transport(self, proxy: ParsedProxy) -> Optional[dict]:
-        t = (proxy.transport or "tcp").lower()
-        if t in ("raw", "tcp", "none"):
-            return None  # plain TCP — no transport block
-        elif t == "ws":
-            tr: dict = {"type": "ws", "path": proxy.path or "/"}
-            if proxy.host_header:
-                tr["headers"] = {"Host": proxy.host_header}
-            return tr
-        elif t == "grpc":
-            return {"type": "grpc", "service_name": proxy.service_name or ""}
-        elif t == "httpupgrade":
-            return {"type": "httpupgrade", "path": proxy.path or "/",
-                    "host": proxy.host_header or ""}
-        elif t in ("http", "h2", "http2"):
-            tr2: dict = {"type": "http"}
-            if proxy.path:
-                tr2["path"] = proxy.path
-            if proxy.host_header:
-                tr2["host"] = [proxy.host_header]
-            return tr2
-        else:
-            # Unknown transport (xhttp, splithttp, quic…) — fall back to raw
-            logger.debug("Unknown transport %r for %s — using raw TCP", t, proxy.host)
-            return None
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _make_transport(proxy: ParsedProxy) -> Optional[dict]:
+        transport = (proxy.transport or "tcp").lower()
+        if transport in ("raw", "tcp", "none"): return None
+        if transport == "ws":
+            result = {"type": "ws", "path": proxy.path or "/"}
+            if proxy.host_header: result["headers"] = {"Host": proxy.host_header}
+            return result
+        if transport == "grpc": return {"type": "grpc", "service_name": proxy.service_name or ""}
+        if transport == "httpupgrade": return {"type": "httpupgrade", "path": proxy.path or "/", "host": proxy.host_header or ""}
+        if transport in ("http", "h2", "http2"):
+            result = {"type": "http"}
+            if proxy.path: result["path"] = proxy.path
+            if proxy.host_header: result["host"] = [proxy.host_header]
+            return result
+        return None
 
     @property
     def has_singbox(self) -> bool:
         return self._singbox_path is not None
 
     @staticmethod
-    def _chunk(lst: list, size: int):
-        for i in range(0, len(lst), size):
-            yield lst[i:i + size]
+    def _chunk(values: list, size: int):
+        for index in range(0, len(values), size):
+            yield values[index:index + size]
 
     @staticmethod
     def _find_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
 
     @staticmethod
     def _kill_process(process: Optional[subprocess.Popen]) -> None:
-        if process is None:
-            return
+        if process is None: return
         try:
-            if os.name != "nt":
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            else:
-                process.kill()
-        except Exception:
-            pass
+            if os.name != "nt": os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            else: process.kill()
+        except Exception: pass

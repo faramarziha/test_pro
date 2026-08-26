@@ -307,7 +307,7 @@ def _run_pipeline_thread(source_url, text_input, concurrency, timeout, rs) -> No
         loop.close()
 
 
-async def _async_pipeline(source_url, text_input, concurrency, timeout, rs) -> None:
+async def _async_pipeline(source_url, text_input, concurrency, timeout, min_speed, rs) -> None:
     fetcher = SubscriptionFetcher()
     parser = ProxyParser()
 
@@ -343,9 +343,9 @@ async def _async_pipeline(source_url, text_input, concurrency, timeout, rs) -> N
 
     tester = SingBoxTester(
         concurrency=concurrency, connect_timeout=timeout,
-        singbox_path=sb_path, installer=installer,
+        singbox_path=sb_path, installer=installer, min_download_kbps=min_speed,
     )
-    _log(rs, f"[3/4] تست تأخیر واقعی {len(parsed)} کانفیگ (generate_204)...", "stage")
+    _log(rs, f"[3/4] تست اتصال و سرعت {len(parsed)} کانفیگ (حداقل {min_speed:.0f} KB/s)...", "stage")
 
     def _on_progress(done, total, _tr):
         rs["tested"] = done
@@ -465,8 +465,11 @@ def _render_sidebar():
     with st.sidebar.expander("⚙️ تنظیمات پیشرفته", expanded=False):
         concurrency = st.slider("تست‌های همزمان", 10, 200, 50, 10,
                                 help="بیشتر = سریع‌تر ولی سنگین‌تر")
-        timeout = st.slider("تایم‌اوت (ثانیه)", 2.0, 10.0, 5.0, 0.5,
-                            help="حداکثر انتظار برای هر کانفیگ")
+        timeout = st.slider("تایم‌اوت (ثانیه)", 2.0, 20.0, 8.0, 0.5,
+                            help="حداکثر انتظار برای اتصال و نمونه‌گیری سرعت")
+        min_speed = st.number_input("حداقل سرعت دانلود (KB/s)", min_value=1.0,
+                                    max_value=10000.0, value=100.0, step=10.0,
+                                    help="کانفیگ باید حداقل این سرعت را در تست واقعی داشته باشد")
 
     st.sidebar.markdown("---")
     path = find_singbox_sync()
@@ -481,7 +484,7 @@ def _render_sidebar():
         unsafe_allow_html=True,
     )
 
-    return source_url, text_input, concurrency, timeout
+    return source_url, text_input, concurrency, timeout, min_speed
 
 # ---------------------------------------------------------------------------
 # Header
@@ -630,13 +633,16 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         flag = _country_flag(r.country_code)
         c[1].markdown(f'<div class="ph-cell">{flag} {r.country or "—"}</div>',
                       unsafe_allow_html=True)
-        ping = f"{r.latency_ms:.0f} ms" if (r.is_working and r.latency_ms > 0) else "—"
+        ping = (f"{r.download_kbps:.0f} KB/s" if r.is_working and r.download_kbps > 0 else
+                (f"{r.latency_ms:.0f} ms" if r.is_working and r.latency_ms > 0 else "—"))
         ping_color = "#22c55e" if r.is_working and r.latency_ms < 300 else ("#fbbf24" if r.is_working else "#7b8494")
         c[2].markdown(f'<div class="ph-cell" style="color:{ping_color};font-weight:700">{ping}</div>',
                       unsafe_allow_html=True)
         c[3].markdown(_badge(r.category), unsafe_allow_html=True)
-        c[4].markdown(f'<div style="font-size:0.9rem">{"🟢" if r.is_working else "🔴"}</div>',
-                      unsafe_allow_html=True)
+        if r.ip_evidence:
+            c[3].caption(f"اطمینان: {r.ip_confidence} · {', '.join(r.ip_evidence)}")
+        status = "🟢" if r.is_working else f"🔴 {r.test_error[:18]}"
+        c[4].markdown(f'<div style="font-size:0.72rem">{status}</div>', unsafe_allow_html=True)
         if c[5].button("کپی", key=f"cpy_{page}_{i}", use_container_width=True):
             _do_copy(r.proxy_raw)
             st.session_state.last_copied = r.proxy_raw
@@ -683,7 +689,9 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         json_out = json.dumps([
             {"protocol": r.protocol, "host": r.host, "port": r.port,
              "latency_ms": r.latency_ms, "country": r.country, "city": r.city,
-             "isp": r.isp, "category": r.category, "config": r.proxy_raw}
+             "isp": r.isp, "category": r.category, "ip_confidence": r.ip_confidence,
+             "download_kbps": r.download_kbps, "test_error": r.test_error,
+             "config": r.proxy_raw}
             for r in rows if r.is_working
         ], indent=2, ensure_ascii=False)
         st.download_button("📊 خروجی JSON", json_out,
@@ -762,7 +770,7 @@ def main() -> None:
         st.session_state._trigger_run = False
 
     rs = st.session_state._run_state
-    source_url, text_input, concurrency, timeout = _render_sidebar()
+    source_url, text_input, concurrency, timeout, min_speed = _render_sidebar()
     _render_header(rs)
 
     if st.session_state._trigger_run:
@@ -771,7 +779,7 @@ def main() -> None:
         rs = st.session_state._run_state
         t = threading.Thread(
             target=_run_pipeline_thread,
-            args=(source_url, text_input, concurrency, timeout, rs),
+            args=(source_url, text_input, concurrency, timeout, min_speed, rs),
             daemon=True,
         )
         t.start()
