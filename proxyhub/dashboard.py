@@ -556,7 +556,7 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
     working = [r for r in enriched if r.is_working]
     dead = len(enriched) - len(working)
 
-    # Stats cards
+    # Stats
     s1, s2, s3, s4 = st.columns(4)
     cards = [
         (len(enriched), "کل کانفیگ‌ها", "#e2e8f0"),
@@ -572,131 +572,33 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
                 f'<div class="s-lbl">{lbl}</div></div>',
                 unsafe_allow_html=True)
 
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # ---- Filter toolstrip ----------------------------------------------------------------
-    t1, t2, t3, t4 = st.columns([2.2, 1.4, 1.2, 1.6])
-
-    with t1:
-        search = st.text_input(
-            "جستجو",
-            placeholder="🔍 نام · سرور · کشور · ISP · آی‌پی · پروتکل...",
-            key="fs",
-            label_visibility="collapsed",
-        )
-
-    with t2:
+    # Filters
+    f1, f2 = st.columns([2, 3])
+    with f1:
+        search = st.text_input("جستجو", placeholder="🔍 جستجو (نام، سرور، کشور)...",
+                               key="fs", label_visibility="collapsed")
+    with f2:
         all_cats = sorted({r.category for r in enriched})
         cat_labels = [CATEGORY_FA.get(c, c) for c in all_cats]
         label_to_cat = {CATEGORY_FA.get(c, c): c for c in all_cats}
-        sel_labels = st.pills(
-            "دسته‌بندی",
-            cat_labels,
-            selection_mode="multi",
-            key="fpills",
-            label_visibility="collapsed",
-            default=[],
-        )
+        sel_labels = st.pills("دسته‌بندی", cat_labels, selection_mode="multi",
+                              key="fpills", label_visibility="collapsed")
         sel_cats = [label_to_cat[l] for l in (sel_labels or [])]
 
-    with t3:
-        working_only = st.checkbox(
-            "فقط سالم ✓",
-            value=False,
-            key="fwork",
-        )
+    working_only = st.checkbox("فقط کانفیگ‌های سالم", value=False, key="fwork")
 
-    with t4:
-        show_dead = st.checkbox(
-            "نشون بده ▼",
-            value=True,
-            key="fshow_dead",
-            help="(CHECK = نمایش خاموش‌ها) (غیرفعال = فقط سالم)",
-        )
-
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    # Protocol pills
-    all_protocols = ["VLESS", "VMESS", "TROJAN", "SS", "HY2", "TUIC"]
-    present = sorted({r.protocol for r in enriched})
-    available = [p for p in all_protocols if p in present]
-    if available:
-        proto_labels = available
-        proto_sel = st.pills(
-            "پروتکل",
-            proto_labels,
-            selection_mode="multi",
-            key="fprotocols",
-            label_visibility="collapsed",
-            default=[],
-        )
-    else:
-        proto_sel = []
-
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    # Delay-range sliders (ms) — refine working-only latency window
-    delay_min = st.slider(
-        "حد پایین تأخیر (ms) — مثل v2rayNG",
-        min_value=0,
-        max_value=3000,
-        value=0,
-        step=10,
-        key="fdelay_min",
-        help="فقط کانفیگ‌های با تأخیر ≥ این عدد را نشان بده",
-    )
-    delay_max = st.slider(
-        "حد بالای تأخیر (ms)",
-        min_value=50,
-        max_value=9999,
-        value=9999,
-        step=50,
-        key="fdelay_max",
-        help="فقط کانفیگ‌های با تأخیر ≤ این عدد را نشان بده",
-    )
-
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-    # Sort-order controls
-    s1b, s2b = st.columns([1.2, 1.2])
-    ascending = st.toggle(
-        "ترتیب وابسته به تأخیر ☝️",
-        value=True,
-        key="fascending",
-        help="روشن = کم → زیاد · خاموش = زیاد → کم",
-    )
-    with s1b:
-        sort_field = st.radio(
-            "مرتب‌سازی بر اساس",
-            ["تأخیر (ms)", "سرعت (KB/s)", "کشور", "نام"],
-            key="fsort_field",
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-    with s2b:
-        sort_direction = "ascending" if ascending else "descending"
-
-    # ---- Apply filters ---------------------------------------------------------------
-    rows: list[EnrichedResult] = []
+    rows = []
     for r in enriched:
-        if sel_cats and r.category not in sel_cats:
-            continue
-        if proto_sel and r.protocol not in proto_sel:
-            continue
         if working_only and not r.is_working:
             continue
-        if not r.is_working and not show_dead:
+        if sel_cats and r.category not in sel_cats:
             continue
-        latency = r.latency_ms if (r.is_working and r.latency_ms > 0) else None
-        if latency is not None:
-            if latency < delay_min or latency > delay_max:
-                continue
         if search:
             q = search.lower()
-            hay = " ".join(str(x or "") for x in
-                           [r.host, r.ip, r.isp, r.country, r.city,
-                            r.protocol, r.proxy_raw])
-            if q not in hay.lower():
+            if not any(q in str(f).lower() for f in
+                       [r.host, r.ip, r.isp, r.country, r.city, r.proxy_raw] if f):
                 continue
         rows.append(r)
 
@@ -704,33 +606,12 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
         st.info("نتیجه‌ای با فیلترهای فعلی پیدا نشد.")
         return
 
-    # ---- Sort rows --------------------------------------------------------------------
-    if sort_field == "تأخیر (ms)":
-        key_fn = lambda r: (
-            r.latency_ms if (r.is_working and r.latency_ms > 0) else 99999,
-            r.host,
-        )
-    elif sort_field == "سرعت (KB/s)":
-        key_fn = lambda r: (
-            -(r.download_kbps if (r.is_working and r.download_kbps > 0) else 0.0),
-            r.host,
-        )
-    elif sort_field == "کشور":
-        key_fn = lambda r: (
-            (r.country or "zzz").lower(),
-            r.host,
-        )
-    else:
-        key_fn = lambda r: (_config_name(r).lower(), r.host)
-
-    rows.sort(key=key_fn, reverse=not ascending)
-
-    # ---- Table header -----------------------------------------------------------------
+    # Header
     h = st.columns([2.7, 1.3, 0.9, 1.4, 0.7, 0.8], vertical_alignment="center")
     for col, title in zip(h, ["نام کانفیگ", "کشور", "تأخیر", "نوع شبکه", "وضعیت", "کپی"]):
         col.markdown(f'<div class="ph-head">{title}</div>', unsafe_allow_html=True)
 
-    # ---- Pagination -------------------------------------------------------------------
+    # Pagination
     PAGE = 20
     total_pages = max(1, (len(rows) + PAGE - 1) // PAGE)
     if "table_page" not in st.session_state:
@@ -739,76 +620,43 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
     page = st.session_state.table_page
     page_rows = rows[page * PAGE:(page + 1) * PAGE]
 
-    # ---- Render rows -----------------------------------------------------------------
+    # Rows
     for i, r in enumerate(page_rows):
-        c = st.columns([2.7, 1.3, 0.9, 1.4, 0.7, 0.8], vertical_alignment="center", gap="small")
+        c = st.columns([2.7, 1.3, 0.9, 1.4, 0.7, 0.8], vertical_alignment="center")
         name = _config_name(r)
         proto = r.protocol.lower()
         with c[0]:
             st.markdown(
                 f'<div class="ph-row"><div class="ph-name">{name}</div>'
                 f'<div class="ph-sub">{proto} · {r.host}:{r.port}</div></div>',
-                unsafe_allow_html=True,
-            )
+                unsafe_allow_html=True)
         flag = _country_flag(r.country_code)
-        c[1].markdown(
-            f'<div class="ph-cell">{flag} {r.country or "—"}</div>',
-            unsafe_allow_html=True,
-        )
-
-        # Latency / speed display
+        c[1].markdown(f'<div class="ph-cell">{flag} {r.country or "—"}</div>',
+                      unsafe_allow_html=True)
         if r.is_working and r.speed_verified and r.download_kbps > 0:
-            perf = f"{r.download_kbps:.0f} KB/s"
-            perf_color = "#22c55e" if r.download_kbps >= 500 else (
-                "#fbbf24" if r.download_kbps >= 100 else "#fb923c"
-            )
+            ping = f"{r.download_kbps:.0f} KB/s"
+        elif r.is_working and not r.speed_verified:
+            ping = "؟"
         elif r.is_working and r.latency_ms > 0:
-            perf = f"{r.latency_ms:.0f} ms"
-            perf_color = "#22c55e" if r.latency_ms < 300 else (
-                "#fbbf24" if r.latency_ms < 600 else "#94a3b8"
-            )
-        elif r.is_working:
-            perf = "؟"
-            perf_color = "#fbbf24"
+            ping = f"{r.latency_ms:.0f} ms"
         else:
-            perf = "—"
-            perf_color = "#475569"
-        c[2].markdown(
-            f'<div class="ph-cell" style="color:{perf_color};font-weight:700">'
-            f'{perf}</div>',
-            unsafe_allow_html=True,
-        )
-
+            ping = "—"
+        ping_color = "#22c55e" if (r.is_working and r.speed_verified) else ("#fbbf24" if r.is_working else "#7b8494")
+        c[2].markdown(f'<div class="ph-cell" style="color:{ping_color};font-weight:700">{ping}</div>',
+                      unsafe_allow_html=True)
         c[3].markdown(_badge(r.category), unsafe_allow_html=True)
         if r.ip_evidence:
             c[3].caption(f"اطمینان: {r.ip_confidence} · {', '.join(r.ip_evidence)}")
-
-        # Test method + status
-        method_label = {
-            "real_delay": "تأخیر واقعی",
-            "tcp": "TCP ping",
-            "tcp_connect": "TCP connect",
-        }.get(r.test_method, r.test_method)
-        if r.is_working:
-            status_mark = f"🟢 سالم · {method_label}"
-        else:
-            short_err = (r.test_error or "خطا")[:18]
-            status_mark = f"🔴 خراب · {short_err}"
-        c[4].markdown(
-            f'<div style="font-size:0.7rem">{status_mark}</div>',
-            unsafe_allow_html=True,
-        )
-
-        if c[5].button(
-            "کپی",
-            key=f"cpy_{page}_{i}",
-            use_container_width=True,
-        ):
+        status = "🟢" if r.is_working else f"🔴 {r.test_error[:18]}"
+        c[4].markdown(f'<div style="font-size:0.72rem">{status}</div>', unsafe_allow_html=True)
+        if r.is_working and not r.speed_verified:
+            c[4].caption("سرعت اندازه‌گیری نشد")
+        if c[5].button("کپی", key=f"cpy_{page}_{i}", use_container_width=True):
             _do_copy(r.proxy_raw)
             st.session_state.last_copied = r.proxy_raw
             st.toast("کپی شد ✓", icon="📋")
 
-    # ---- Pagination controls ----------------------------------------------------------
+    # Pagination
     if total_pages > 1:
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         p1, p2, p3 = st.columns([1, 2, 1])
@@ -819,28 +667,22 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
                 st.stop()
         with p2:
             st.markdown(
-                f'<div style="text-align:center;color:#7b8494;font-size:0.76rem;'
-                f'padding-top:0.55rem;">'
+                f'<div style="text-align:center;color:#7b8494;font-size:0.76rem;padding-top:0.55rem;">'
                 f'صفحه {page + 1} از {total_pages} — {len(rows):,} نتیجه</div>',
-                unsafe_allow_html=True,
-            )
+                unsafe_allow_html=True)
         with p3:
-            if st.button(
-                "بعدی ◀",
-                disabled=page >= total_pages - 1,
-                use_container_width=True,
-            ):
+            if st.button("بعدی ◀", disabled=page >= total_pages - 1, use_container_width=True):
                 st.session_state.table_page += 1
                 st.rerun()
                 st.stop()
 
-    # ---- Last copied fallback ---------------------------------------------------------
+    # Last copied fallback
     last = st.session_state.get("last_copied")
     if last:
         with st.expander("📋 آخرین کانفیگ کپی‌شده"):
             st.code(last, language=None)
 
-    # ---- Export section ---------------------------------------------------------------
+    # Export
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
     st.subheader("💾 خروجی")
     working_raws = [r.proxy_raw for r in rows if r.is_working]
@@ -848,64 +690,32 @@ def _render_table(enriched: list[EnrichedResult]) -> None:
 
     e1, e2, e3 = st.columns(3)
     with e1:
-        st.download_button(
-            "📄 خروجی TXT (سابسکریپشن)",
-            "\n".join(working_raws),
-            f"proxyhub_{ts}.txt",
-            "text/plain",
-            use_container_width=True,
-            disabled=not working_raws,
-        )
+        st.download_button("📄 خروجی TXT (سابسکریپشن)", "\n".join(working_raws),
+                           f"proxyhub_{ts}.txt", "text/plain",
+                           use_container_width=True, disabled=not working_raws)
     with e2:
-        json_out = json.dumps(
-            [
-                {
-                    "protocol": r.protocol,
-                    "host": r.host,
-                    "port": r.port,
-                    "latency_ms": r.latency_ms,
-                    "download_kbps": r.download_kbps,
-                    "country": r.country,
-                    "city": r.city,
-                    "isp": r.isp,
-                    "category": r.category,
-                    "ip_confidence": r.ip_confidence,
-                    "quality": r.quality,
-                    "speed_verified": r.speed_verified,
-                    "exit_ip": r.exit_ip,
-                    "test_method": r.test_method,
-                    "config": r.proxy_raw,
-                }
-                for r in rows if r.is_working
-            ],
-            indent=2,
-            ensure_ascii=False,
-        )
-        st.download_button(
-            "📊 خروجی JSON",
-            json_out,
-            f"proxyhub_{ts}.json",
-            "application/json",
-            use_container_width=True,
-            disabled=not working_raws,
-        )
+        json_out = json.dumps([
+            {"protocol": r.protocol, "host": r.host, "port": r.port,
+             "latency_ms": r.latency_ms, "country": r.country, "city": r.city,
+             "isp": r.isp, "category": r.category, "ip_confidence": r.ip_confidence,
+             "download_kbps": r.download_kbps, "quality": r.quality,
+             "speed_verified": r.speed_verified, "exit_ip": r.exit_ip,
+             "test_error": r.test_error, "config": r.proxy_raw}
+            for r in rows if r.is_working
+        ], indent=2, ensure_ascii=False)
+        st.download_button("📊 خروجی JSON", json_out,
+                           f"proxyhub_{ts}.json", "application/json",
+                           use_container_width=True, disabled=not working_raws)
     with e3:
         by_cat: dict[str, list[str]] = {}
         for r in rows:
             if r.is_working:
                 by_cat.setdefault(r.category, []).append(r.proxy_raw)
-        cat_txt = "\n\n".join(
-            f"# {CATEGORY_FA.get(c, c)}\n" + "\n".join(cfgs)
-            for c, cfgs in by_cat.items()
-        )
-        st.download_button(
-            "📂 خروجی بر اساس دسته",
-            cat_txt,
-            f"proxyhub_cats_{ts}.txt",
-            "text/plain",
-            use_container_width=True,
-            disabled=not by_cat,
-        )
+        cat_txt = "\n\n".join(f"# {CATEGORY_FA.get(c, c)}\n" + "\n".join(cfgs)
+                              for c, cfgs in by_cat.items())
+        st.download_button("📂 خروجی بر اساس دسته", cat_txt,
+                           f"proxyhub_cats_{ts}.txt", "text/plain",
+                           use_container_width=True, disabled=not by_cat)
 
 
 def _config_name(r: EnrichedResult) -> str:

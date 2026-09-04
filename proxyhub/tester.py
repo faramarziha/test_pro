@@ -47,7 +47,6 @@ class TestResult:
     attempts: int = 1
     quality: str = ""          # "fast" | "acceptable" | "unverified"
     speed_verified: bool = True
-    test_method: str = "real_delay"  # how this proxy was tested
 
 
 @dataclass
@@ -180,31 +179,27 @@ class SingBoxTester:
                         # Server truncated the body — cannot judge speed fairly.
                         return TestResult(proxy, True, round(latency_ms, 1), round(download_kbps, 1),
                                           resolved_ip, exit_ip, quality="unverified",
-                                          speed_verified=False, attempts=attempt,
-                                          test_method="real_delay")
+                                          speed_verified=False, attempts=attempt)
                     if download_kbps < self._min_download_kbps:
                         return TestResult(proxy, False, round(latency_ms, 1), round(download_kbps, 1),
                                           resolved_ip, exit_ip,
                                           error=(f"speed below minimum ({download_kbps:.1f} KB/s "
                                                  f"< {self._min_download_kbps:.0f} KB/s)"),
-                                          attempts=attempt, test_method="real_delay")
+                                          attempts=attempt)
                     quality = "fast" if download_kbps >= 500 else "acceptable"
                     return TestResult(proxy, True, round(latency_ms, 1), round(download_kbps, 1),
-                                      resolved_ip, exit_ip, quality=quality, attempts=attempt,
-                                      test_method="real_delay")
+                                      resolved_ip, exit_ip, quality=quality, attempts=attempt)
             except asyncio.TimeoutError:
                 last_error = "timeout"
             except SpeedSampleError as exc:
                 # Speed endpoint misbehaved — the tunnel works, keep the config.
                 return TestResult(proxy, True, error="", quality="unverified",
-                                  speed_verified=False, attempts=attempt,
-                                  test_method="real_delay")
+                                  speed_verified=False, attempts=attempt)
             except Exception as exc:
                 last_error = str(exc)[:100]
             if attempt < MAX_TEST_ATTEMPTS:
                 await asyncio.sleep(0.15)
-        return TestResult(proxy, False, error=last_error, attempts=MAX_TEST_ATTEMPTS,
-                          test_method="real_delay")
+        return TestResult(proxy, False, error=last_error, attempts=MAX_TEST_ATTEMPTS)
 
     async def _get_exit_ip(self, session: aiohttp.ClientSession) -> str:
         """Ask an echo endpoint through the tunnel for the real egress IP."""
